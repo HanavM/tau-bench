@@ -136,7 +136,8 @@ class Env(object):
                 self.step(action)
         gt_data_hash = self.get_data_hash()
         info = RewardActionInfo(
-            r_actions=data_hash == gt_data_hash, gt_data_hash=gt_data_hash
+            r_actions= (data_hash == gt_data_hash), 
+            gt_data_hash=gt_data_hash
         )
         if not info.r_actions:
             reward = 0.0
