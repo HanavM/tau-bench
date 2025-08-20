@@ -40,7 +40,7 @@ def parse_args() -> RunConfig:
         "--agent-strategy",
         type=str,
         default="tool-calling",
-        choices=["tool-calling", "act", "react", "few-shot"],
+        choices=["tool-calling", "act", "react", "few-shot", "react-intervened"],
     )
     parser.add_argument(
         "--temperature",
@@ -69,6 +69,12 @@ def parse_args() -> RunConfig:
     parser.add_argument("--shuffle", type=int, default=0)
     parser.add_argument("--user-strategy", type=str, default="llm", choices=[item.value for item in UserStrategy])
     parser.add_argument("--few-shot-displays-path", type=str, help="Path to a jsonlines file containing few shot displays")
+
+    parser.add_argument("--best_of_N", type=int,default=3)
+    parser.add_argument("--run_intervention", action="store_true")
+
+
+
     args = parser.parse_args()
     print(args)
     return RunConfig(
@@ -90,6 +96,8 @@ def parse_args() -> RunConfig:
         shuffle=args.shuffle,
         user_strategy=args.user_strategy,
         few_shot_displays_path=args.few_shot_displays_path,
+        best_of_N=args.best_of_N,
+        run_intervention=args.run_intervention
     )
 
 

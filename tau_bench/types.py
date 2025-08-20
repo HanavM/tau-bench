@@ -64,9 +64,15 @@ class EnvResetResponse(BaseModel):
 class EnvRunResult(BaseModel):
     task_id: int
     reward: float
+    intervened_message: Optional[str] = None
+    intervened_index: Optional[str] = None
+    improved: Optional[bool] = None
     info: Dict[str, Any]
     traj: List[Dict[str, Any]]
     trial: int
+
+
+
 
 
 class RunConfig(BaseModel):
@@ -88,3 +94,5 @@ class RunConfig(BaseModel):
     shuffle: int = 0
     user_strategy: str = "llm"
     few_shot_displays_path: Optional[str] = None
+    best_of_N: Optional[int] = 3
+    run_intervention: bool = False

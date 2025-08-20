@@ -67,6 +67,8 @@ class ChatReActAgent(Agent):
             {"role": "system", "content": self.prompt},
             {"role": "user", "content": response.observation},
         ]
+    
+    
         total_cost = 0.0
         info = {}
         for _ in range(max_num_steps):
