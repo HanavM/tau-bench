@@ -120,7 +120,7 @@ class ChatReActAgentIntervened(Agent):
             {"role": "system", "content": self.prompt},
             {"role": "user", "content": response.observation},
         ]
-
+        # print("here")
         total_cost = 0.0
         info = {}
         for _ in range(max_num_steps):
@@ -131,6 +131,7 @@ class ChatReActAgentIntervened(Agent):
             info = {**info, **response.info.model_dump()}
             if action.name != RESPOND_ACTION_NAME:
                 obs = "API output: " + obs
+            # print(obs)
             messages.extend(
                 [
                     message,
@@ -147,8 +148,11 @@ class ChatReActAgentIntervened(Agent):
         )
 
     def add_intervention(trajectory, intervention_text, intervention_id):
-        idx_b = -1 if (intervention_id.find("B") == -1) else intervention_id.find("B")
-        idx_intervention = int(intervention_id[idx_b+1:])
+        if type(intervention_id) == int:
+            idx_intervention =  intervention_id  
+        else:
+            idx_b = -1 if (intervention_id.find("B") == -1) else intervention_id.find("B")
+            idx_intervention = int(intervention_id[idx_b+1:])
 
         new_trajectory = trajectory[:idx_intervention+1]
         new_trajectory.append(
@@ -221,9 +225,9 @@ class ChatReActAgentIntervened(Agent):
 
             response = openai.chat.completions.create(
                 model=model,
-                messages=[{"role": "user","content":SEARCH_PROMPT.format(item=text, search_query=query, SINGLE_RUN_CITE_INSTRUCTION=SINGLE_RUN_CITE_INSTRUCTION)}],
-                max_tokens=4096,
-                temperature = 0.1
+                messages=[{"role": "user","content":SEARCH_PROMPT.format(text=text, search_query=query, SINGLE_RUN_CITE_INSTRUCTION=SINGLE_RUN_CITE_INSTRUCTION)}],
+                max_completion_tokens=4096,
+                temperature = 1.0
             )
 
 
@@ -250,7 +254,7 @@ class ChatReActAgentIntervened(Agent):
 
 
         transcript = result.model_dump()
-        rubric, metadata, user_task = load_TAU_reAct_extra_data(transcript)
+        specification, metadata, user_task = load_TAU_reAct_extra_data(transcript)
         agent_run_docent = load_TAU_Reasoning_inspect_log([transcript])
 
         print("N:", N)
@@ -259,80 +263,82 @@ class ChatReActAgentIntervened(Agent):
         conversation_history = []
         conversation_history.append({
             "role": "system",
-            "content": questioning_agent_prompt_working_backwards.format(rubric=rubric, user_task=user_task,metadata=metadata, N=N),
+            "content": questioning_agent_prompt_working_backwards.format(specification=specification, user_task=user_task,metadata=metadata, N=N),
         })   
         
         turns = 0
 
         while turns < 30:
-            turns+=1
-            response = openai.chat.completions.create(
-                model=self.model,
-                messages=conversation_history,
-                max_tokens=4096,
-                temperature=0.1
-            )
+            try:
+                turns+=1
+                response = openai.chat.completions.create(
+                    model=self.model,
+                    messages=conversation_history,
+                    max_completion_tokens=4096,
+                    temperature=1.0
+                )
 
-            reply = response.choices[0].message.content.strip()
-            match = re.search(r'<query>(.*?)</query>', reply, re.DOTALL)
-
-            conversation_history.append({
-                "role": "assistant",
-                "content": reply,
-            })
-
-
-
-            if match:
-                query_text = match.group(1).strip()
-                conversation_history[-1]["tool_calls"] = [{"function": { "arguments": query_text, "name": "querying_tool"      }, "id": "12345","type": "function"}]
-                tool_response = execute_search(agent_run_docent[0].transcripts["default"].to_str(), query_text, self.model).strip()
+                reply = response.choices[0].message.content.strip()
+                match = re.search(r'<query>(.*?)</query>', reply, re.DOTALL)
 
                 conversation_history.append({
-                    "role": "tool",
-                    "tool_call_id": "12345",
-                    "content": tool_response
+                    "role": "assistant",
+                    "content": reply,
                 })
-                continue
 
 
 
-            match = re.search(r'<answer>(.*?)</answer>', reply, re.DOTALL)
+                if match:
+                    query_text = match.group(1).strip()
+                    conversation_history[-1]["tool_calls"] = [{"function": { "arguments": query_text, "name": "querying_tool"      }, "id": "12345","type": "function"}]
+                    tool_response = execute_search(agent_run_docent[0].transcripts["default"].to_str(), query_text, self.model).strip()
 
-            if match:
-                answer_text = match.group(1).strip()
-                try:
-                    
+                    conversation_history.append({
+                        "role": "tool",
+                        "tool_call_id": "12345",
+                        "content": tool_response
+                    })
+                    continue
 
-                    answer_list = json.loads(answer_text)
-                    # print("answer:", answer_list)
 
-                    possible_new_trajectories = []
-                    for intervention in answer_list:
-                        intervention_text = intervention["intervention_text"]
-                        intervention_id = intervention["id"]
+
+                match = re.search(r'<answer>(.*?)</answer>', reply, re.DOTALL)
+
+                if match:
+                    answer_text = match.group(1).strip()
+                    try:
                         
-                        possible_new_trajectories.append(add_intervention(transcript["traj"], intervention_text, intervention_id))
 
-                
-                    # pprint.pprint(conversation_history)
-                    return answer_list, conversation_history
+                        answer_list = json.loads(answer_text)
+                        # print("answer:", answer_list)
 
-                except json.JSONDecodeError:
-                    print("Error decoding JSON.")
+                        possible_new_trajectories = []
+                        # for intervention in answer_list:
+                        #     intervention_text = intervention["intervention_text"]
+                        #     intervention_id = intervention["id"]
+                            
+                            # possible_new_trajectories.append(add_intervention(transcript["traj"], intervention_text, intervention_id))
+
+                    
+                        # pprint.pprint(conversation_history)
+                        return answer_list, conversation_history
+
+                    except json.JSONDecodeError:
+                        print("Error decoding JSON.")
+                    break
+
+
+                else:
+                    print("model did not call query tool or generate intervention")
+                    break
+            except Exception as e:
+                print(f"error: {e}.")
                 break
 
-
-            else:
-                print("model did not call query tool or generate intervention")
-                break
         
 
         print("no changes with intervention, error must have happened")
-        return [
-                {"role": "system", "content": self.prompt},
-                {"role": "user", "content": response.observation},
-            ], conversation_history
+        return [False], conversation_history
         
 
 

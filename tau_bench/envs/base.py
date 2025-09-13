@@ -1,4 +1,5 @@
 # Copyright Sierra
+import json
 
 import random
 from hashlib import sha256
@@ -123,6 +124,7 @@ class Env(object):
 
     def calculate_reward(self) -> RewardResult:
         data_hash = self.get_data_hash()
+        data_test = self.data
         reward = 1.0
         actions = [
             action for action in self.task.actions if action.name != RESPOND_ACTION_NAME
@@ -135,6 +137,23 @@ class Env(object):
             if action.name not in self.terminate_tools:
                 self.step(action)
         gt_data_hash = self.get_data_hash()
+        gt_data = self.data
+
+
+        # print("GT_Data:")
+        # print(type(gt_data))
+
+        # print("Experimental Data:")
+        # print(type(data_test))
+        print("")
+
+        # with open("gt_data.json", "w") as f:
+        #     json.dump(gt_data, f, indent=4)  # indent=4 makes it readable
+
+        # # Export data_test
+        # with open("data_test.json", "w") as f:
+        #     json.dump(data_test, f, indent=4)
+
         info = RewardActionInfo(
             r_actions= (data_hash == gt_data_hash), 
             gt_data_hash=gt_data_hash

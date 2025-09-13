@@ -65,7 +65,7 @@ SINGLE_RUN_CITE_INSTRUCTION = "Each transcript and each block has a unique index
 SEARCH_PROMPT = f"""
 Your task is to find transcript messages that satistify a search query in a transcript of multiple messages between a user and an assistant:
 <text>
-{{item}}
+{{text}}
 </text>
 <query>
 {{search_query}}
@@ -92,19 +92,19 @@ Remember to only use the '<instance>' and '</instance>' tags, nothing else.
 
 questioning_agent_prompt_working_backwards = """
 
-You are an agent who needs to improve another agent's by writing *{N}* possible intervention text that will be inserted into the agent's transcript. To do this, there are two steps you need to do.
+You are an agent who needs to improve another agent's by writing N = *{N}* possible intervention text that will be inserted into the agent's transcript. To do this, there are two steps you need to do.
 
 First, you need to analyze the root cause of why the agent's transcript fails. This has to be ONE root cause where if it is fixed, all other problems will be fixed and the agent will be succesfull.
 
-Second, once you figure out the root cause, you will plan out *{N}* possible intervention(s) which are a text that will be injected into the agent's conversation history so that it avoids the root problem.
+Second, once you figure out the root cause, you will plan out N = *{N}* possible intervention(s) which are a text that will be injected into the agent's conversation history so that it avoids the root problem.
 
 1) To determine the root issue of the agent's transcript, you are given the rubric of that agent (which is just its system prompt), so you know how the agent should have acted. You will also be given the preferences of the human user so that you know what the agent should have done for the user. Finally, you will be given the scoring metadata for the transcript, which explains whether the agent was succesful or not.
 
-Below is the rubric for which the agent was graded on.
+Below is the specification for which the agent was graded on.
 
-<START RUBRIC>
-{rubric}
-</END RUBRIC>
+<START SPECIFICATION>
+{specification}
+</END SPECIFICATION>
 
 Below is the task that the user was trying to accomplish through the agent.
 
@@ -125,7 +125,7 @@ The strategy you must employ is to work backwards, determining the direct cause 
 
 The intervention that you plan is going to be a text and a location in that transcript that you want the text to be inserted to. The location are indicted by transcript IDs. Therefore, you need to purposefully ask the querying tool to give you transcript messages to that YOU can at one point reason out the best position to insert a message that will be the most favorable to making the agent succeed. Thus you should ask questions that also indicate locations, for example "What is the first transcript index where the agent should have asked about the user's preferences about . . ." 
 
-[Remember, you are planning out *{N}* interventions, so you need to determine *{N}* issues that you can create *{N}* independent interventions to nudge the model away from making that issue. Really try to reason through multiple steps to find the real underlying issues rather than just getting one query and determining multiple interventions from it. Remember, these interventions are going to be implemented independent of each other so they don't build on each other.]
+[Remember, you are planning out *{N}* interventions(s), so you need to determine *{N}* issues that you can create *{N}* independent interventions to nudge the model away from making that issue. Really try to reason through multiple steps to find the real underlying issues rather than just getting one query and determining multiple interventions from it. Remember, these interventions are going to be implemented independent of each other so they don't build on each other (if N != 1).]
 
 To ask a query to the tool, type out the query in the following format
 
@@ -140,7 +140,7 @@ Complete your token generation and wait for a response from the tool. You have 3
 
 2) Once you feel confident that you have all the information needed about the root issue of agent's transcript, you can begin crafting interventions. An intervention is when at ONE certain point in the agent's transcript, a certain extraneous SYSTEM prompt is inserted into the assistant's prompt. This can be a nudge like for example "make sure to ask the user for their insurance preferences before you continue" or "double check the possible flight routes again to find the cheapest one."
 
-You are creating *{N}* possible interventions which will all be tried INDEPENDENTLY of each other, so if there are multiple interventions you create, they are all tried independent of each other so they should not build off one another. Output your interventions as a list of JSON elements where each JSON has the fields "intervention_text" (which is the text inserted) and "id" (which is the id of the message that the intervention text will be added after). The ids should have been provided by the tool. Make sure that the id is given in the same way that the tool outputs it, preferably it is better to not use letters and just use the numeric id. Print out that list between <answer> and </answer> tags, as seen below.
+You are creating N = *{N}* possible interventions which will all be tried INDEPENDENTLY of each other, so if there are multiple interventions you create, they are all tried independent of each other so they should not build off one another (if N != 1). Output your interventions as a list of JSON elements where each JSON has the fields "intervention_text" (which is the text inserted) and "id" (which is the id of the message that the intervention text will be added after). The ids should have been provided by the tool. [Make sure that the id is an integer, not a string like how the tool may provide it to you.] Print out that list between <answer> and </answer> tags, as seen below.
 
 <answer>
 [ {{
@@ -165,7 +165,7 @@ You are creating *{N}* possible interventions which will all be tried INDEPENDEN
 
 Do not include any extraneous characters in this answer. Make sure it is a list of JSON elements seperated by commas. An intervention is not directed towards the user, it is directed to the agent. So do not directly ask the user something.
 
-Proceed with determining possible interventions. 
+Proceed with determining possible interventions. [If you create multiple interventions, place them in the list in ascending order based on the intervention index so later interventions are at the end of the list and earlier interventions are at the beginning of the list.]
 
 [You are encouraged to still reason with yourself through text, but every output should somewhere have either a Tool call: using <query> and </query> notation or a Final output with sample interventions: using <answer> and </answer> notation. Therefore you should not have any messages where you ONLY plan or say "let's plan . . .". Every message needs to have a tool call or an output.]
 
