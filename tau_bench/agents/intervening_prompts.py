@@ -170,3 +170,129 @@ Proceed with determining possible interventions. [If you create multiple interve
 [You are encouraged to still reason with yourself through text, but every output should somewhere have either a Tool call: using <query> and </query> notation or a Final output with sample interventions: using <answer> and </answer> notation. Therefore you should not have any messages where you ONLY plan or say "let's plan . . .". Every message needs to have a tool call or an output.]
 
 """.strip("")
+
+
+
+questioning_agent_prompt_working_backwards_react = """
+You are a ReAct agent.
+
+At each step, your generation should have exactly the following format:
+
+
+Thought:
+<A single line of reasoning to process the context and inform the decision making. Do not include extra lines.>
+Action:
+{{"name": <The name of the action>, "arguments": <The arguments to the action in json format>}}
+
+
+The Action will be parsed, so it must be valid JSON.
+
+You should not use made-up or placeholder arguments.
+
+For example, if you want to use a get weather tool: 
+
+Your response can be like this:
+Thought:
+Since the user asks for the weather of San Francisco in USA, the unit should be in fahrenheit. I can query get_current_weather to get the weather.
+Action:
+{{"name": "get_current_weather", "arguments": {{"location": "San Francisco, CA", "format": "fahrenheit"}}}}
+
+And if the tool returns "70F", your response can be:
+
+Thought:
+I can answer the user now.
+Action:
+{{"name": respond, "arguments": {{"content": "The current weather of San Francisco is 70F."}}}}
+
+Try to be helpful and always follow the policy.
+
+As a ReAct agent, your task is to improve another ReAct agent's performance on a specific task by writing N = *{N}* possible intervention texts that will be inserted into the agent's transcript, forcing it to be fix its faulty behaviors.
+
+There are two steps:
+
+First, you need to analyze the root cause of why the agent's transcript fails. This has to be ONE root cause where if it is fixed, all other problems will be fixed and the agent will be succesfull.
+
+Second, once you figure out the root cause, you will plan out N = *{N}* possible intervention(s) which are a text that will be injected into the agent's conversation history so that it avoids the root problem.
+
+1) To determine the root issue of the agent's transcript, you are given the rubric of that agent (which is just its system prompt), so you know how the agent should have acted. You will also be given the preferences of the human user so that you know what the agent should have done for the user. Finally, you will be given the scoring metadata for the transcript, which explains whether the agent was succesful or not.
+
+Below is the specification for which the agent was graded on.
+
+<START SPECIFICATION>
+{specification}
+</END SPECIFICATION>
+
+Below is the task that the user was trying to accomplish through the agent.
+
+<START TASK>
+{user_task}
+</END TASK>
+
+Finally, below is the reward information about the agent's performance. This details numerically how well the agent completed the task according to the user and its rubric. Pay most attention to the double value for the "reward" key. That is whether or not the agent passes.
+
+<START METADATA>
+{metadata}
+</END METADATA>
+
+YOU ARE NOT GIVEN THE ACTUAL TRANSCRIPT OF THE AGENT, so to determine the root issue, you are given a tool. The tool takes in natural language prompts and searches through the agent's transcript for answers to the prompt. Use the rubric and user task to determine the root issue in the agent's transcript.
+The strategy you must employ is to work backwards, determining the direct cause of what causes the final issue / mistake of the agent and then determining what causes that issue, etc . . . So you can start with something broader based on the user task, rubric, and scoring metadata, like for example "What led the agent to incorrectly conduct [the task]?" and then working down with prompts like "What caused the agent to choose [specific preference] over [another preference] without asking the user?"
+
+[Remember though, you do not have the transcript, so your first couple prompts should be in determining all the wide variety of issues present, rather than preliminarily being fixated on an issue.]
+
+The intervention that you plan is going to be a text and a location in that transcript that you want the text to be inserted to. The location are indicted by transcript IDs. Therefore, you need to purposefully ask the querying tool to give you transcript messages to that YOU can at one point reason out the best position to insert a message that will be the most favorable to making the agent succeed. Thus you should ask questions that also indicate locations, for example "What is the first transcript index where the agent should have asked about the user's preferences about . . ."
+
+[Remember, you are planning out *{N}* interventions(s), so you need to determine *{N}* issues that you can create *{N}* independent interventions to nudge the model away from making that issue. Really try to reason through multiple steps to find the real underlying issues rather than just getting one query and determining multiple interventions from it. Remember, these interventions are going to be implemented independent of each other so they don't build on each other (if N != 1).]
+
+The query tool's name is "docent_query_tool". Thus, an example usage of the query tool would be the following:
+
+Thought:
+Now that I know that the agent mistakenly assumes [specific preference] on transcript message 10, I need to understand where that error first sprouts from. 
+Action:
+{{"name": "docent_query_tool", "arguments": {{"query": "Where is the first point in the transcript where the agent starts to believe that the user prefers [specific preference]?"}}}}
+
+
+[Do NOT treat the querying tool like another Agent. It is just an automated searching tool, so it does not have conversation memory.]
+
+Keep querying to get more and more specific information about the underlying causes of the transcript that can help you create {N} interventions. 
+
+
+2) Once you feel confident that you have all the information needed about the root issue of agent's transcript, you can begin crafting interventions. An intervention is when at ONE certain point in the agent's transcript, a certain extraneous SYSTEM prompt is inserted into the assistant's prompt. This can be a nudge like for example "make sure to ask the user for their insurance preferences before you continue" or "double check the possible flight routes again to find the cheapest one."
+
+You are creating N = *{N}* possible interventions which will all be tried INDEPENDENTLY of each other, so if there are multiple interventions you create, they are all tried independent of each other so they should not build off one another (if N != 1). Output your interventions as a list of JSON elements where each JSON has the fields "intervention_text" (which is the text inserted) and "id" (which is the id of the message that the intervention text will be added after). The ids should have been provided by the tool. [Make sure that the id is an integer, not a string like how the tool may provide it to you.] Print out that list between <answer> and </answer> tags, as seen below.
+
+Outputting interventions is NOT a tool call so an example intervention output may look like the following:
+
+
+Thought:
+With what I understand about the root issues of the transcript on transcript message 5, 8, and 13, I can create sample interventions fixing them.  
+Action:
+{{"name": respond, "arguments": {{"content": "    <answer>[ {{"intervention_text": "<your-intervention-text-1>", "id": "<your-id-1>"}}, {{"intervention_text": "<your-intervention-text-2>", "id": "<your-id-2>"}}, . . . {{"intervention_text": "<your-intervention-text-N>", "id": "<your-id-N>"}}] </answer>     "}}}}
+
+
+
+
+[Your list should be of size *{N}*.]
+
+Do not include any extraneous characters in this answer. Make sure it is a list of JSON elements seperated by commas. An intervention is not directed towards the user, it is directed to the agent. So do not directly ask the user something.
+
+Note, the curly braces in this prompt are double curly braces. Whenver you create text, make sure to only use singular curly braces.
+
+[Ensure that every output you create is in the Thought-Action format and if you are doing a query call you use the following format:
+
+Thought:
+some text
+Action:
+{{"name": "docent_query_tool", "arguments": {{"query": "some text"}}}}
+
+and if it is an intervention output, use the following format:
+
+Thought:
+With what I understand about the root issues of the transcript on transcript message 5, 8, and 13, I can create sample interventions fixing them.  
+Action:
+{{"name": respond, "arguments": {{"content": "    <answer>[interventions here] </answer>     "}}}}
+
+You should not create an output that is not either of these. Make sure to repeatedly query. It is likely that if you only query a few times and create a final intervention, they will be inefficient.]
+
+Additionally, you are not allowed to just ask the querying tool to give you the transcript or a summary of each message of the transcript. You must deduct the issues of the transcript with your reasoning and the specific attributes the querying tool gives you, as to reduce the amount of text you have to deal with. You must work backwards so start off by asking general questions about the transcript and then get more specific into individual errors. 
+
+"""

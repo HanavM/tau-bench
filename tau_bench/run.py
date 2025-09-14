@@ -149,7 +149,7 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                     else:
 
                         #get intervention possibilites and conv history of intervening agent
-                        answer_list, intervening_agent_conversation = agent.run_intervention(
+                        answer_list, intervening_agent_conversation = agent.run_intervention_react(
                             env=isolated_env,
                             task_index=idx,
                             result=result,
@@ -158,7 +158,7 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                         does_improve = False
                         passed_intervened = False
                         best_intervened_score = 0
-                        if (answer_list[0] == False):
+                        if (answer_list == None or answer_list[0] == False):
                             # total.append(True)
                             intervened_succesful_count.append(0.0)
                             agent_conversation_histories.append({"task_id":idx,"traj":intervening_agent_conversation})
@@ -357,13 +357,16 @@ def run(config: RunConfig) -> List[EnvRunResult]:
     display_metrics(results)
 
     if (config.run_intervention):
+        for leftover in range (max(0, (end_index - config.start_index) - len(intervened_succesful_count))):
+            intervened_succesful_count.append(0)
+
         average = sum(intervened_succesful_count) / len(total)
         print("Average reward (intervened):", average)
         print("total samples:", len(total))
         print("# of samples with intervention with score > 0:", len(intervened_succesful_count))
         print("# of samples improved from a score of 0 with intervention:", len(improved_count))
         # print("percent of samples passed with intervention:", len(intervened_succesful_count) / len(total))
-        print("percent of missed samples improved with intervention:", len(improved_count) / len(total))
+        print("percent of missed samples improved with intervention:", len(improved_count) / len(intervened_succesful_count))
         print("scores for interventions:", intervened_succesful_count)
 
 

@@ -21,7 +21,7 @@ from docent.data_models import BaseAgentRunMetadata
 from pydantic import Field
 from docent.data_models.chat import SystemMessage, UserMessage, AssistantMessage, ToolMessage, ContentReasoning
 import re
-from tau_bench.agents.intervening_prompts import questioning_agent_prompt, SEARCH_PROMPT, SINGLE_RUN_CITE_INSTRUCTION, questioning_agent_prompt_working_backwards
+from tau_bench.agents.intervening_prompts import questioning_agent_prompt, SEARCH_PROMPT, SINGLE_RUN_CITE_INSTRUCTION, questioning_agent_prompt_working_backwards, questioning_agent_prompt_working_backwards_react
 import pprint
 from docent.data_models.chat import (
     SystemMessage,
@@ -36,7 +36,7 @@ from tau_bench.agents.base import Agent
 from tau_bench.envs.base import Env
 from tau_bench.types import EnvRunResult, RunConfig
 from tau_bench.types import (
-    Action,
+    Action, 
     SolveResult,
     RESPOND_ACTION_NAME,
     RESPOND_ACTION_FIELD_NAME,
@@ -340,6 +340,206 @@ class ChatReActAgentIntervened(Agent):
         print("no changes with intervention, error must have happened")
         return [False], conversation_history
         
+
+    def run_intervention_react(
+        self, N, result: EnvRunResult, env: Env, task_index: Optional[int] = None
+    ):
+    
+        def load_TAU_Reasoning_inspect_log(log) -> list[AgentRun]:
+            agent_runs: list[AgentRun] = []
+            for sample in log:
+                scores: dict[str, int | float | bool] = {}
+                scores["correct"] =  (sample["reward"] == 1.0)
+
+                metadata = CustomTauAgentRunMetadata(
+                        task_id="airline",
+                        sample_id=str(sample["task_id"]),
+                        epoch_id=int(sample["trial"]),
+                        model=self.model,
+                        scores=scores,
+                        additional_metadata=None,
+                        scoring_metadata=None,
+                    )
+                
+
+                messages = []
+
+                for idx, message in enumerate(sample["traj"]):
+                    if message["role"] == "tool":
+                        messages.append(ToolMessage(id = str(idx),content=message["content"], tool_call_id=message["tool_call_id"], function=message["name"]))
+
+                    elif message["role"] == "assistant":
+                        contentstr = message["content"]
+                        if contentstr == None:
+                            contentstr = ""
+                        if message["tool_calls"]:
+                            contentstr += json.dumps(message["tool_calls"], indent=2)
+                        if message["function_call"]:
+                            contentstr += str(message["function_call"])
+                        if message["annotations"]:
+                            contentstr += message["annotations"]
+
+                        messages.append(AssistantMessage(id = str(idx),content=contentstr))
+
+                    else:
+                        messages.append(UserMessage(id = str(idx),content=message["content"]))
+
+
+                agent_runs.append(
+                AgentRun(
+                    transcripts={
+                        "default": Transcript(
+                            messages=messages
+                        )
+                    },
+                    metadata=metadata,
+                )
+                )
+
+            return agent_runs
+
+        def execute_search(text, query, model):
+
+            response = openai.chat.completions.create(
+                model=model,
+                messages=[{"role": "user","content":SEARCH_PROMPT.format(text=text, search_query=query, SINGLE_RUN_CITE_INSTRUCTION=SINGLE_RUN_CITE_INSTRUCTION)}],
+                max_completion_tokens=4096,
+                temperature = 1.0
+            )
+
+
+
+            return response.choices[0].message.content.strip()
+
+        def load_TAU_reAct_extra_data(transcript):
+            return transcript["traj"][0], transcript["info"]["reward_info"], transcript["info"]["task"]
+
+        def add_intervention(trajectory, intervention_text, intervention_id):
+            idx_b = -1 if (intervention_id.find("B") == -1) else intervention_id.find("B")
+            idx_intervention = int(intervention_id[idx_b+1:])
+
+            new_trajectory = trajectory[:idx_intervention+1]
+            new_trajectory.append(
+                {
+                    "role":"system",
+                    "content": "[*INTERVENTION*: " +intervention_text + "]"
+                }
+            )
+
+            return new_trajectory
+
+    
+
+        transcript = result.model_dump()
+        specification, metadata, user_task = load_TAU_reAct_extra_data(transcript)
+        agent_run_docent = load_TAU_Reasoning_inspect_log([transcript])
+
+        print("N:", N)
+
+
+        conversation_history = []
+        conversation_history.append({
+            "role": "system",
+            "content": questioning_agent_prompt_working_backwards_react.format(specification=specification, user_task=user_task,metadata=metadata, N=N),
+        })   
+        
+        turns = 0
+        while turns < 30:
+            # break
+            turns += 1
+            response = openai.chat.completions.create(
+                model=self.model,
+                messages=conversation_history,
+                max_completion_tokens=4096,
+                temperature=1.0
+            )
+
+            
+            reply = response.choices[0].message.content.strip()
+
+            # print(reply)
+
+            action_str = reply.split("Action:")[-1].strip()
+
+
+            try:
+                action_parsed = json.loads(action_str)
+            except json.JSONDecodeError:
+                # this is a hack
+                action_parsed = {
+                    "name": RESPOND_ACTION_NAME,
+                    "arguments": {RESPOND_ACTION_FIELD_NAME: action_str},
+                }
+
+            assert "name" in action_parsed
+            assert "arguments" in action_parsed
+            # action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
+
+            # print(action_parsed)
+        
+
+
+            match = re.search(r'<query>(.*?)</query>', reply, re.DOTALL)
+
+            conversation_history.append({
+                "role": "assistant",
+                "content": reply,
+            })
+
+
+
+            if action_parsed["name"] == "docent_query_tool":
+                query_text = action_parsed["arguments"]["query"].strip()
+
+
+                conversation_history[-1]["tool_calls"] = [{"function": { "arguments": query_text, "name": "docent_querying_tool"      }, "id": "12345","type": "function"}]
+                tool_response = execute_search(agent_run_docent[0].transcripts["default"].to_str(), query_text, self.model).strip()
+
+                conversation_history.append({
+                    "role": "tool",
+                    "tool_call_id": "12345",
+                    "content": tool_response
+                })
+                # continue
+            
+
+            else:
+            
+                content_txt = action_parsed["arguments"]["content"]
+
+                match = re.search(r'<answer>(.*?)</answer>', content_txt, re.DOTALL)
+
+                if match:
+                    answer_text = match.group(1).strip()
+                    try:
+
+
+                        answer_list = json.loads(answer_text)
+                        print("answer:", answer_list)
+
+                        # possible_new_trajectories = []
+                        # for intervention in answer_list:
+                        #     intervention_text = intervention["intervention_text"]
+                        #     intervention_id = intervention["id"]
+
+                        #     possible_new_trajectories.append(add_intervention(transcript["traj"], intervention_text, intervention_id))
+
+
+                        # pprint.pprint(conversation_history)
+                        return answer_list, conversation_history
+
+                    except json.JSONDecodeError:
+                        print("Error decoding JSON.") 
+                        break
+
+
+                else:
+                    print("model did not call query tool or generate intervention")
+                    break
+
+        return None ,conversation_history
+
+
 
 
 
