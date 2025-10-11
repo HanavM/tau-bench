@@ -149,7 +149,7 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                     else:
 
                         #get intervention possibilites and conv history of intervening agent
-                        answer_list, intervening_agent_conversation = agent.run_intervention_react(
+                        answer_list, intervening_agent_conversation = agent.run_intervention(
                             env=isolated_env,
                             task_index=idx,
                             result=result,

@@ -275,7 +275,7 @@ class ChatReActAgentIntervened(Agent):
                     model=self.model,
                     messages=conversation_history,
                     max_completion_tokens=4096,
-                    temperature=1.0
+                    temperature=self.temperature
                 )
 
                 reply = response.choices[0].message.content.strip()
