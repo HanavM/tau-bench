@@ -89,43 +89,44 @@ This list should be exhaustive.
 Remember to only use the '<instance>' and '</instance>' tags, nothing else.
 """.strip()
 
-
 questioning_agent_prompt_working_backwards = """
 
-You are an agent who needs to improve another agent's by writing N = *{N}* possible intervention text that will be inserted into the agent's transcript. To do this, there are two steps you need to do.
+You are an agent who needs to improve another agent that performed unsuccesfully in a multiturn interaction by writing N = *{N}* possible intervention texts that will be inserted into the agent's conversation history. You must follow these steps to determine the interventions:
 
 First, you need to analyze the root cause of why the agent's transcript fails. This has to be ONE root cause where if it is fixed, all other problems will be fixed and the agent will be succesfull.
 
-Second, once you figure out the root cause, you will plan out N = *{N}* possible intervention(s) which are a text that will be injected into the agent's conversation history so that it avoids the root problem.
+Second, once you figure out the root cause, you will plan out N = *{N}* possible interventions, which are messages that will be injected into a specific point in the agent's conversation history that gives the agent essential information or insights so that it avoids the root problem.
 
-1) To determine the root issue of the agent's transcript, you are given the rubric of that agent (which is just its system prompt), so you know how the agent should have acted. You will also be given the preferences of the human user so that you know what the agent should have done for the user. Finally, you will be given the scoring metadata for the transcript, which explains whether the agent was succesful or not.
-
-Below is the specification for which the agent was graded on.
+1) ROOT ISSUE DETERMINATION. You are given the specification of the agent (which is just its system prompt), so you know what the agent's task. You will also be given the reference metadata which explains how the agent should have perfomed to be deemed succesful. You can be sure that the agent did NOT behave how it should have, meaning it was unsuccesful. 
 
 <START SPECIFICATION>
 {specification}
 </END SPECIFICATION>
 
-Below is the task that the user was trying to accomplish through the agent.
-
-<START TASK>
-{user_task}
-</END TASK>
+<START REFERENCE METADATA>
+{ref_metadata}
+</END REFERENCE METADATA>
 
 Finally, below is the reward information about the agent's performance. This details numerically how well the agent completed the task according to the user and its rubric. Pay most attention to the double value for the "reward" key. That is whether or not the agent passes.
 
-<START METADATA>
-{metadata}
-</END METADATA>
+<START REWARD_INFO>
+{reward_info}
+</END REWARD_INFO>
 
-YOU ARE NOT GIVEN THE ACTUAL TRANSCRIPT OF THE AGENT, so to determine the root issue, you are given a tool. The tool takes in natural language prompts and searches through the agent's transcript for answers to the prompt. Use the rubric and user task to determine the root issue in the agent's transcript.
-The strategy you must employ is to work backwards, determining the direct cause of what causes the final issue / mistake of the agent and then determining what causes that issue, etc . . . So you can start with something broader based on the user task, rubric, and scoring metadata, like for example "What led the agent to book the wrong flight?" and then working down with prompts like "What caused the agent to choose an business flight instead of an economy one."
+YOU ARE NOT GIVEN THE ACTUAL TRANSCRIPT OF THE AGENT, so to determine the root issue, you are given a querying tool which has access to the actual transcript. The tool takes in natural language prompts and searches through the agent's transcript for answers to the prompt.
 
-[Remember though, you do not have the transcript, so your first couple prompts should be in determining all the wide variety of issues present, rather than preliminarily being fixated on an issue.]
+The strategy you must employ is to work backwards, determining the direct cause of what causes the final issue / mistake of the agent and then determining what causes that issue, and so on. Start with broader questions, and work down to more specific questions. An example would be:
 
-The intervention that you plan is going to be a text and a location in that transcript that you want the text to be inserted to. The location are indicted by transcript IDs. Therefore, you need to purposefully ask the querying tool to give you transcript messages to that YOU can at one point reason out the best position to insert a message that will be the most favorable to making the agent succeed. Thus you should ask questions that also indicate locations, for example "What is the first transcript index where the agent should have asked about the user's preferences about . . ." 
+You: "What led the agent to be unsuccesful"
+Tool: "The agent did X instead of Y"
+You: "Which transcript locations did the agent do X instead of Y"
+Tool: "At locations [a,b,c]."
+You: "Explain the issue at location a."
+(And so on, so forth until you feel that you have enough information to determine *{N}* interventions.)
 
-[Remember, you are planning out *{N}* interventions(s), so you need to determine *{N}* issues that you can create *{N}* independent interventions to nudge the model away from making that issue. Really try to reason through multiple steps to find the real underlying issues rather than just getting one query and determining multiple interventions from it. Remember, these interventions are going to be implemented independent of each other so they don't build on each other (if N != 1).]
+Because the intervention you must plan in step 2 consists of a message and a location in the transcript that you want the message to be inserted to, it is advisable to gain information from the querying tool about specific places where errors happen. 
+
+[Remember, you are planning out *{N}* interventions(s), so you need to determine *{N}* distinct issues that you can create *{N}* independent interventions for. Try to reason for multiple steps to find the real underlying issues rather than just getting one query and determining multiple interventions from it.]
 
 To ask a query to the tool, type out the query in the following format
 
@@ -133,12 +134,12 @@ To ask a query to the tool, type out the query in the following format
 insert your query here without double quotes
 </query>
 
-[Do not treat the querying tool like a model, so it does not have conversation memory and should NEVER be reasoning for you. Think of it like an automated searching tool.]
+[The querying tool does not have conversation memory and should NEVER be reasoning for you. Think of it like a more intelligent parsing and searching tool.]
 
-Complete your token generation and wait for a response from the tool. You have 30 turns, so you can freely use the querying tool as much as needed, but watch your limit.
+Complete your token generation and wait for a response from the tool. You may reason for up to 30 turns. You should only move to the next step if you feel that you have sufficient information to create *{N}* distinct interventions are equally important to fixing the agent. 
 
 
-2) Once you feel confident that you have all the information needed about the root issue of agent's transcript, you can begin crafting interventions. An intervention is when at ONE certain point in the agent's transcript, a certain extraneous SYSTEM prompt is inserted into the assistant's prompt. This can be a nudge like for example "make sure to ask the user for their insurance preferences before you continue" or "double check the possible flight routes again to find the cheapest one."
+2) INTERVENTIONS CREATION. An intervention is a message that is given to the agent at any point in its transcript, in hopes of guiding it to not make a certain error. They can be reminders, nudges, or insights. You may provide them with some of your knowledge. Example interventions: "make sure to consider X before you proceed with Y" or "double check that A was valid," or "P is actually larger than Q, so try R instead."
 
 You are creating N = *{N}* possible interventions which will all be tried INDEPENDENTLY of each other, so if there are multiple interventions you create, they are all tried independent of each other so they should not build off one another (if N != 1). Output your interventions as a list of JSON elements where each JSON has the fields "intervention_text" (which is the text inserted) and "id" (which is the id of the message that the intervention text will be added after). The ids should have been provided by the tool. [Make sure that the id is an integer, not a string like how the tool may provide it to you.] Print out that list between <answer> and </answer> tags, as seen below.
 
@@ -165,13 +166,11 @@ You are creating N = *{N}* possible interventions which will all be tried INDEPE
 
 Do not include any extraneous characters in this answer. Make sure it is a list of JSON elements seperated by commas. An intervention is not directed towards the user, it is directed to the agent. So do not directly ask the user something.
 
-Proceed with determining possible interventions. [If you create multiple interventions, place them in the list in ascending order based on the intervention index so later interventions are at the end of the list and earlier interventions are at the beginning of the list.]
+Proceed with determining possible interventions. [Place interventions in the list in ascending order based on the intervention index so later interventions are at the end of the list and earlier interventions are at the beginning of the list.]
 
-[You are encouraged to still reason with yourself through text, but every output should somewhere have either a Tool call: using <query> and </query> notation or a Final output with sample interventions: using <answer> and </answer> notation. Therefore you should not have any messages where you ONLY plan or say "let's plan . . .". Every message needs to have a tool call or an output.]
+[You are encouraged to still reason with yourself through text, but every output should somewhere have either a Tool call: using <query> and </query> notation or a Final output with sample interventions: using <answer> and </answer> notation. Therefore you should not have any messages where you ONLY plan". Every message needs to have a tool call or an output.]
 
 """.strip("")
-
-
 
 questioning_agent_prompt_working_backwards_react = """
 You are a ReAct agent.

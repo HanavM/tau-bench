@@ -263,7 +263,7 @@ class ChatReActAgentIntervened(Agent):
         conversation_history = []
         conversation_history.append({
             "role": "system",
-            "content": questioning_agent_prompt_working_backwards.format(specification=specification, user_task=user_task,metadata=metadata, N=N),
+            "content": questioning_agent_prompt_working_backwards.format(specification=specification, ref_metadata=user_task,reward_info=metadata, N=N),
         })   
         
         turns = 0
@@ -440,7 +440,7 @@ class ChatReActAgentIntervened(Agent):
         conversation_history = []
         conversation_history.append({
             "role": "system",
-            "content": questioning_agent_prompt_working_backwards_react.format(specification=specification, user_task=user_task,metadata=metadata, N=N),
+            "content": questioning_agent_prompt_working_backwards_react.format(specification=specification, ref_metadata=user_task,reward_info=metadata, N=N),
         })   
         
         turns = 0
