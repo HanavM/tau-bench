@@ -164,6 +164,8 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                             agent_conversation_histories.append({"task_id":idx,"traj":intervening_agent_conversation})
                             result_intervened = EnvRunResult(
                                 intervened_message = "no intervention was done",
+                                failure_brief = "no intervention was done",
+                                failure_index = str(-1),
                                 intervened_index = str(-1),
                                 improved = 0,
                                 task_id=idx,
@@ -238,6 +240,22 @@ def run(config: RunConfig) -> List[EnvRunResult]:
 
                                 answer_list[best_of_n_iterator]["id"] = idx_intervention
 
+                            for best_of_n_iterator, intervention in enumerate(answer_list):
+                                try:
+
+                                    failure_id = intervention["failure_id"]
+                                    if type(failure_id) == int:
+                                        idx_failure =  failure_id  
+                                    else:
+                                        idx_b = -1 if (failure_id.rfind("B") == -1) else failure_id.rfind("B")
+                                        idx_failure = int(failure_id[idx_b+1:])
+
+                                except Exception as e:
+                                    print(f"failure id; converting to int idx: {idx} error: {e}.")
+                                    idx_failure = 1
+
+                                answer_list[best_of_n_iterator]["failure_id"] = idx_failure
+
                             sorted_answer_list = sorted(answer_list, key=lambda x: x['id'])
                             
                             # print("sorted possible interventions:", sorted_answer_list)
@@ -246,6 +264,8 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                             for best_of_n_iterator, intervention in enumerate([sorted_answer_list[0], sorted_answer_list[-1]]):
                                 print(f"trying out task id={idx}, intervention {best_of_n_iterator}")
                                 
+                                failure_brief = intervention["failure_brief"]
+                                failure_id = intervention["failure_id"]
                                 intervention_text = intervention["intervention_text"]
                                 intervention_id = intervention["id"]
                                 print(f"intervention id: {intervention_id} intervention txt: {intervention_text}")
@@ -273,6 +293,8 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                                 
                                 #compile result of intervention
                                 result_intervened = EnvRunResult(
+                                    failure_brief = failure_brief,
+                                    failure_index = str(failure_id),
                                     intervened_message = intervention_text,
                                     intervened_first_or_last = first_or_last,
                                     intervened_index = str(intervention_id),

@@ -263,7 +263,7 @@ class ChatReActAgentIntervened(Agent):
         conversation_history = []
         conversation_history.append({
             "role": "system",
-            "content": questioning_agent_prompt_working_backwards.format(specification=specification, ref_metadata=user_task,reward_info=metadata, N=N),
+            "content": questioning_agent_prompt_working_backwards.format(specification=specification, ref_metadata=user_task, N=N),
         })   
         
         turns = 0
@@ -271,6 +271,7 @@ class ChatReActAgentIntervened(Agent):
         while turns < 30:
             try:
                 turns+=1
+                # print("turn:", turns)
                 response = openai.chat.completions.create(
                     model="gpt-4o-mini-2024-07-18",
                     messages=conversation_history,
@@ -321,6 +322,9 @@ class ChatReActAgentIntervened(Agent):
 
                     
                         # pprint.pprint(conversation_history)
+                        
+                    
+
                         return answer_list, conversation_history
 
                     except json.JSONDecodeError:
@@ -447,6 +451,7 @@ class ChatReActAgentIntervened(Agent):
         while turns < 30:
             # break
             turns += 1
+            print("turn:", turns)
             response = openai.chat.completions.create(
                 model="gpt-4o-mini-2024-07-18",
                 messages=conversation_history,

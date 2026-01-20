@@ -64,6 +64,8 @@ class EnvResetResponse(BaseModel):
 class EnvRunResult(BaseModel):
     task_id: int
     reward: float
+    failure_brief: Optional[str] = None
+    failure_index: Optional[str] = None
     intervened_message: Optional[str] = None
     intervened_index: Optional[str] = None
     intervened_first_or_last: Optional[str] = None
