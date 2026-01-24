@@ -69,6 +69,8 @@ class EnvRunResult(BaseModel):
     intervened_message: Optional[str] = None
     intervened_index: Optional[str] = None
     intervened_first_or_last: Optional[str] = None
+    success_prev: Optional[bool] = None
+    success_after: Optional[bool] = None
     improved: Optional[bool] = None
     info: Dict[str, Any]
     traj: List[Dict[str, Any]]

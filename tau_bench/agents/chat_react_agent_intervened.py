@@ -178,7 +178,7 @@ class ChatReActAgentIntervened(Agent):
                         task_id="airline",
                         sample_id=str(sample["task_id"]),
                         epoch_id=int(sample["trial"]),
-                        model="gpt-4o-mini-2024-07-18",
+                        model="gpt-5-mini",
                         scores=scores,
                         additional_metadata=None,
                         scoring_metadata=None,
@@ -224,7 +224,7 @@ class ChatReActAgentIntervened(Agent):
         def execute_search(text, query, model):
 
             response = openai.chat.completions.create(
-                model="gpt-4o-mini-2024-07-18",
+                model="gpt-5-mini",
                 messages=[{"role": "user","content":SEARCH_PROMPT.format(text=text, search_query=query, SINGLE_RUN_CITE_INSTRUCTION=SINGLE_RUN_CITE_INSTRUCTION)}],
                 max_completion_tokens=4096,
                 temperature = 1.0
@@ -254,6 +254,11 @@ class ChatReActAgentIntervened(Agent):
 
 
         transcript = result.model_dump()
+        try: 
+            val = (transcript["traj"][0])
+        except Exception as e:
+            print("mcdonalds here error: {e},", transcript["traj"])
+        # print("transcript sdfasdf:",transcript["traj"])
         specification, metadata, user_task = load_TAU_reAct_extra_data(transcript)
         agent_run_docent = load_TAU_Reasoning_inspect_log([transcript])
 
@@ -273,10 +278,10 @@ class ChatReActAgentIntervened(Agent):
                 turns+=1
                 # print("turn:", turns)
                 response = openai.chat.completions.create(
-                    model="gpt-4o-mini-2024-07-18",
+                    model="gpt-5-mini",
                     messages=conversation_history,
                     max_completion_tokens=4096,
-                    temperature=self.temperature
+                    temperature=1.0
                 )
 
                 reply = response.choices[0].message.content.strip()
@@ -359,7 +364,7 @@ class ChatReActAgentIntervened(Agent):
                         task_id="airline",
                         sample_id=str(sample["task_id"]),
                         epoch_id=int(sample["trial"]),
-                        model="gpt-4o-mini-2024-07-18",
+                        model="gpt-5-mini",
                         scores=scores,
                         additional_metadata=None,
                         scoring_metadata=None,
@@ -405,7 +410,7 @@ class ChatReActAgentIntervened(Agent):
         def execute_search(text, query, model):
 
             response = openai.chat.completions.create(
-                model="gpt-4o-mini-2024-07-18",
+                model="gpt-5-mini",
                 messages=[{"role": "user","content":SEARCH_PROMPT.format(text=text, search_query=query, SINGLE_RUN_CITE_INSTRUCTION=SINGLE_RUN_CITE_INSTRUCTION)}],
                 max_completion_tokens=4096,
                 temperature = 1.0
@@ -453,10 +458,10 @@ class ChatReActAgentIntervened(Agent):
             turns += 1
             print("turn:", turns)
             response = openai.chat.completions.create(
-                model="gpt-4o-mini-2024-07-18",
+                model="gpt-5-mini",
                 messages=conversation_history,
                 max_completion_tokens=4096,
-                temperature=0.1
+                temperature=1.0
             )
 
             
@@ -498,7 +503,7 @@ class ChatReActAgentIntervened(Agent):
 
 
                 conversation_history[-1]["tool_calls"] = [{"function": { "arguments": query_text, "name": "docent_querying_tool"      }, "id": "12345","type": "function"}]
-                tool_response = execute_search(agent_run_docent[0].transcripts["default"].to_str(), query_text, "gpt-4o-mini-2024-07-18").strip()
+                tool_response = execute_search(agent_run_docent[0].transcripts["default"].to_str(), query_text, "gpt-5-mini").strip()
 
                 conversation_history.append({
                     "role": "tool",

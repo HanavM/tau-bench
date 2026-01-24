@@ -170,6 +170,8 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                                 improved = 0,
                                 task_id=idx,
                                 reward=res.reward,
+                                success_prev = result.reward,
+                                success_after = None,
                                 info=res.info,
                                 traj=res.messages,
                                 trial=i,
@@ -231,8 +233,10 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                                     if type(intervention_id) == int:
                                         idx_intervention =  intervention_id  
                                     else:
-                                        idx_b = -1 if (intervention_id.rfind("B") == -1) else intervention_id.rfind("B")
-                                        idx_intervention = int(intervention_id[idx_b+1:])
+                                        idx_b = -1 if (failure_id.rfind("B") == -1) else failure_id.rfind("B")
+                                        if idx_b == -1:
+                                            idx_b = -1 if (failure_id.rfind("A") == -1) else failure_id.rfind("A")
+                                        idx_failure = int(failure_id[idx_b+1:])
 
                                 except Exception as e:
                                     print(f"converting to int idx: {idx} error: {e}.")
@@ -248,6 +252,8 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                                         idx_failure =  failure_id  
                                     else:
                                         idx_b = -1 if (failure_id.rfind("B") == -1) else failure_id.rfind("B")
+                                        if idx_b == -1:
+                                            idx_b = -1 if (failure_id.rfind("A") == -1) else failure_id.rfind("A")
                                         idx_failure = int(failure_id[idx_b+1:])
 
                                 except Exception as e:
@@ -261,7 +267,8 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                             # print("sorted possible interventions:", sorted_answer_list)
 
                             #loop through all intervention possibilites
-                            for best_of_n_iterator, intervention in enumerate([sorted_answer_list[0], sorted_answer_list[-1]]):
+                            # for best_of_n_iterator, intervention in enumerate([sorted_answer_list[0], sorted_answer_list[-1]]):
+                            for best_of_n_iterator, intervention in enumerate(sorted_answer_list):
                                 print(f"trying out task id={idx}, intervention {best_of_n_iterator}")
                                 
                                 failure_brief = intervention["failure_brief"]
@@ -287,9 +294,9 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                                 # print("ran new agent task with intervened transcript")
 
 
-                                first_or_last = "first"
-                                if (best_of_n_iterator == 1):
-                                    first_or_last = "last"
+                                first_or_last = str(best_of_n_iterator)
+                                # if (best_of_n_iterator == 1):
+                                #     first_or_last = "last"
                                 
                                 #compile result of intervention
                                 result_intervened = EnvRunResult(
@@ -299,6 +306,8 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                                     intervened_first_or_last = first_or_last,
                                     intervened_index = str(intervention_id),
                                     improved = (result.reward == 0 and res_intervened.reward != 0),
+                                    success_prev = result.reward,
+                                    success_after = res_intervened.reward,
                                     task_id=idx,
                                     reward=res_intervened.reward,
                                     info=res_intervened.info,
