@@ -25,19 +25,137 @@ def run(config: RunConfig) -> List[EnvRunResult]:
     
     random.seed(config.seed)
     time_str = datetime.now().strftime("%m%d%H%M%S")
-    ckpt_path = f"{config.log_dir}/{config.agent_strategy}-{config.model.split('/')[-1]}-{config.temperature}_range_{config.start_index}-{config.end_index}_user-{config.user_model}-{config.user_strategy}_{time_str}"
 
-    ckpt_path_intervened = ckpt_path + "_intervened"
-    agent_conv_history_path = ckpt_path + 'intervening_agent_conversation_history.json'
-    ckpt_path += ".json"
-    ckpt_path_intervened += ".json"
 
+    if (not config.run_intervention):
+        # run baseline 
+        ckpt_folder = f"{config.log_dir}/{config.agent_strategy}-{config.model.split('/')[-1]}-{config.temperature}_range_{config.start_index}-{config.end_index}_user-{config.user_model}-{config.user_strategy}_{time_str}"
+        os.makedirs(ckpt_folder)
+        ckpt_path = ckpt_folder + "/transcript.json"
+        
+        if not os.path.exists(config.log_dir):
+            os.makedirs(config.log_dir)
+        
+        print("running baseline")
+        print(f"Loading user with strategy: {config.user_strategy}")
+        env = get_env(
+            config.env,
+            user_strategy=config.user_strategy,
+            user_model=config.user_model,
+            user_provider=config.user_model_provider,
+            task_split=config.task_split,
+        )
+        agent = agent_factory(
+            tools_info=env.tools_info,
+            wiki=env.wiki,
+            config=config,
+        )
+        end_index = (
+            len(env.tasks) if config.end_index == -1 else min(config.end_index, len(env.tasks))
+        )
+        results: List[EnvRunResult] = []
+        lock = multiprocessing.Lock()
+        if config.task_ids and len(config.task_ids) > 0:
+            print(f"Running tasks {config.task_ids} (checkpoint path: {ckpt_path})")
+        else:
+            print(
+                f"Running tasks {config.start_index} to {end_index} (checkpoint path: {ckpt_path})"
+        )
+        for i in range(config.num_trials):
+            if config.task_ids and len(config.task_ids) > 0:
+                idxs = config.task_ids
+            else:
+                idxs = list(range(config.start_index, end_index))
+            # if config.shuffle:
+            #     random.shuffle(idxs)
+            # print("idxs:",idxs)
+            print(f"N from config {config.best_of_N}")
+
+            def _run(idx: int, N=config.best_of_N) -> EnvRunResult:
+            
+                isolated_env = get_env(
+                    config.env,
+                    user_strategy=config.user_strategy,
+                    user_model=config.user_model,
+                    task_split=config.task_split,
+                    user_provider=config.user_model_provider,
+                    task_index=idx,
+                )
+
+                print(f"Running task {idx}")
+                try:
+                    res = agent.solve(
+                        env=isolated_env,
+                        task_index=idx,
+                    )
+                    result = EnvRunResult(
+                        task_id=idx,
+                        reward=res.reward,
+                        info=res.info,
+                        traj=res.messages,
+                        trial=i,
+                    )
+                except Exception as e:
+                    result = EnvRunResult(
+                        task_id=idx,
+                        reward=0.0,
+                        info={"error": str(e), "traceback": traceback.format_exc()},
+                        traj=[],
+                        trial=i,
+                    )
+                print(
+                    "✅" if result.reward == 1 else "❌",
+                    f"task_id={idx}",
+                    # result.info,
+                )
+                print("-----")
+                with lock:
+                    data = []
+                    if os.path.exists(ckpt_path):
+                        with open(ckpt_path, "r") as f:
+                            data = json.load(f)
+                    with open(ckpt_path, "w") as f:
+                        json.dump(data + [result.model_dump()], f, indent=2)
+
+                # results_intervened.extend
+                
+                return result
+
+
+            with ThreadPoolExecutor(max_workers=config.max_concurrency) as executor:
+                res = executor.map(_run, idxs)
+                res = list(res)
+                results.extend(res)
+
+        display_metrics(results)
+        
+        with open(ckpt_path, "w") as f:
+            json.dump([result.model_dump() for result in results], f, indent=2)
+            print(f"\n📄 Results saved to {ckpt_path}\n")
+
+        return results
+
+
+
+
+    #Run interventions
+    baseline_path = config.baseline_path
+    intervention_folder = baseline_path + f"/intervened-by_{config.intervention_model}_{time_str}"
+    os.makedirs(intervention_folder, exist_ok=True)
+
+    print(f"saving to: {intervention_folder}")
+    ckpt_path_intervened = intervention_folder + "/intervened-transcripts.json"
+    agent_conv_history_path = intervention_folder + '/agent_conversation_history.json'
+
+    examples = []
+    with open(baseline_path + "/transcript.json","r", encoding="utf-8") as json_file:
+        examples = json.load(json_file)
 
 
     if not os.path.exists(config.log_dir):
         os.makedirs(config.log_dir)
 
-    print(f"Loading user with strategy: {config.user_strategy}")
+    print(f"Running interventions by: {config.intervention_model}")
     env = get_env(
         config.env,
         user_strategy=config.user_strategy,
@@ -60,12 +178,6 @@ def run(config: RunConfig) -> List[EnvRunResult]:
     intervened_succesful_count = []
     agent_conversation_histories = []
     lock = multiprocessing.Lock()
-    if config.task_ids and len(config.task_ids) > 0:
-        print(f"Running tasks {config.task_ids} (checkpoint path: {ckpt_path})")
-    else:
-        print(
-            f"Running tasks {config.start_index} to {end_index} (checkpoint path: {ckpt_path})"
-    )
     for i in range(config.num_trials):
         if config.task_ids and len(config.task_ids) > 0:
             idxs = config.task_ids
@@ -76,8 +188,9 @@ def run(config: RunConfig) -> List[EnvRunResult]:
 
         print(f"N from config {config.best_of_N}")
 
-        def _run(idx: int, N=config.best_of_N) -> EnvRunResult:
-        
+        def _run(baseline_example: dict, N=config.best_of_N) -> EnvRunResult:
+            idx = baseline_example["task_id"]
+
             isolated_env = get_env(
                 config.env,
                 user_strategy=config.user_strategy,
@@ -86,56 +199,220 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                 user_provider=config.user_model_provider,
                 task_index=idx,
             )
+            result = EnvRunResult(
+                task_id=idx,
+                reward=baseline_example["reward"],
+                info=baseline_example["info"],
+                traj=baseline_example["traj"],
+                trial=i,
+            )
 
-            print(f"Running task {idx}")
-            try:
-                res = agent.solve(
+            print(f"Running interventions on {idx}")
+
+            # try:
+            if result.reward == 1.0:
+                total.append(True)
+                intervened_succesful_count.append(1.0)
+                agent_conversation_histories.append({"task_id":idx,"traj":"None. Reward is already 1."})
+                result_intervened = EnvRunResult(
+                    intervened_message = "no intervention was needed. already passed",
+                    intervened_index = str(-1),
+                    improved = 0,
+                    task_id=idx,
+                    reward=result.reward,
+                    info=result.info,
+                    traj=result.traj,
+                    trial=i,
+                )
+                print(f"already passed so no intervention needed. task_id: {idx}")
+                with lock:
+                    data = []
+                    if os.path.exists(ckpt_path_intervened):
+                        with open(ckpt_path_intervened, "r") as f:
+                            data = json.load(f)
+                    with open(ckpt_path_intervened, "w") as f:
+                        json.dump(data + [result_intervened.model_dump()], f, indent=2)
+                    # continue
+            else:
+
+                #get intervention possibilites and conv history of intervening agent
+                print(f"determining interventions right now {idx}")
+                answer_list, intervening_agent_conversation = agent.run_intervention(
                     env=isolated_env,
                     task_index=idx,
-                )
-                result = EnvRunResult(
-                    task_id=idx,
-                    reward=res.reward,
-                    info=res.info,
-                    traj=res.messages,
-                    trial=i,
-                )
-            except Exception as e:
-                result = EnvRunResult(
-                    task_id=idx,
-                    reward=0.0,
-                    info={"error": str(e), "traceback": traceback.format_exc()},
-                    traj=[],
-                    trial=i,
-                )
-            print(
-                "✅" if result.reward == 1 else "❌",
-                f"task_id={idx}",
-                # result.info,
-            )
-            print("-----")
+                    result=result,
+                    N=N
+                ) 
+                print(f"done {idx}")
+                does_improve = False
+                passed_intervened = False
+                best_intervened_score = 0
+                if (answer_list == None or answer_list[0] == False):
+                    # total.append(True)
+                    intervened_succesful_count.append(0.0)
+                    agent_conversation_histories.append({"task_id":idx,"traj":intervening_agent_conversation})
+                    result_intervened = EnvRunResult(
+                        intervened_message = "no intervention was done",
+                        failure_brief = "no intervention was done",
+                        failure_index = str(-1),
+                        intervened_index = str(-1),
+                        improved = 0,
+                        task_id=idx,
+                        reward=result.reward,
+                        success_prev = result.reward,
+                        success_after = None,
+                        info=result.info,
+                        traj=result.messages,
+                        trial=i,
+                    )
+                    with lock:
+                            data = []
+                            if os.path.exists(ckpt_path_intervened):
+                                with open(ckpt_path_intervened, "r") as f:
+                                    data = json.load(f)
+                            with open(ckpt_path_intervened, "w") as f:
+                                json.dump(data + [result_intervened.model_dump()], f, indent=2)
+                    # if (answer_list[0] != False):
+                    total.append(True)
+                    if (does_improve == True):
+                        improved_count.append(True)
+                    # if (passed_intervened == True):
+                    intervened_succesful_count.append(best_intervened_score)
 
-            #implement intervention
-            if (config.run_intervention):
-                print("Starting intervention on task id=", idx)
+                    
+                else:
+                    #add conv history to all conv histories
+                    agent_conversation_histories.append({"task_id":idx,"traj":intervening_agent_conversation})
+
+                    transcript = result.model_dump()
+                    possible_new_trajectories = []
+                    
+
+                    def add_intervention(trajectory, intervention_text, intervention_id):
+                        try:
+                            if type(intervention_id) == int:
+                                idx_intervention =  intervention_id  
+                            else:
+                                idx_b = -1 if (intervention_id.rfind("B") == -1) else intervention_id.rfind("B")
+                                idx_intervention = int(intervention_id[idx_b+1:])
+                        except Exception as e:
+                            print(f"first converting to int idx: {idx} error: {e}.")
+                            idx_intervention = 1
+
+                        new_trajectory = trajectory[:min(idx_intervention+1, len(trajectory) - 1)]
+                        if (len(trajectory) - 1 < idx_intervention+1):
+                            print(f"was out of range task id: {idx}")
+                        new_trajectory.append(
+                            {
+                                "role":"system",
+                                "content": "[*INTERVENTION*: " +intervention_text + "]"
+                            }
+                        )
+
+                        return new_trajectory
+                    
+
+                    # print("possible interventions:", answer_list)
+
+                    
+                    for best_of_n_iterator, intervention in enumerate(answer_list):
+                        try:
+
+                            intervention_id = intervention["id"]
+                            if type(intervention_id) == int:
+                                idx_intervention =  intervention_id  
+                            else:
+                                idx_b = -1 if (intervention_id.rfind("B") == -1) else intervention_id.rfind("B")
+                                if idx_b == -1:
+                                    idx_b = -1 if (intervention_id.rfind("A") == -1) else intervention_id.rfind("A")
+                                idx_intervention = int(intervention_id[idx_b+1:])
+
+                        except Exception as e:
+                            print(f"converting to int idx: {idx} error: {e}.")
+                            idx_intervention = 1
+
+                        answer_list[best_of_n_iterator]["id"] = idx_intervention
+
+                    for best_of_n_iterator, intervention in enumerate(answer_list):
+                        try:
+
+                            failure_id = intervention["failure_id"]
+                            if type(failure_id) == int:
+                                idx_failure =  failure_id  
+                            else:
+                                idx_b = -1 if (failure_id.rfind("B") == -1) else failure_id.rfind("B")
+                                if idx_b == -1:
+                                    idx_b = -1 if (failure_id.rfind("A") == -1) else failure_id.rfind("A")
+                                idx_failure = int(failure_id[idx_b+1:])
+
+                        except Exception as e:
+                            print(f"failure id; converting to int idx: {idx} error: {e}.")
+                            idx_failure = 1
+
+                        answer_list[best_of_n_iterator]["failure_id"] = idx_failure
+
+                    sorted_answer_list = sorted(answer_list, key=lambda x: x['id'])
+                    
+                    # print("sorted possible interventions:", sorted_answer_list)
+
+                    #loop through all intervention possibilites
+                    # for best_of_n_iterator, intervention in enumerate([sorted_answer_list[0], sorted_answer_list[-1]]):
+                    for best_of_n_iterator, intervention in enumerate(sorted_answer_list):
+                        print(f"trying out task id={idx}, intervention {best_of_n_iterator}")
+                        
+                        failure_brief = intervention["failure_brief"]
+                        failure_id = intervention["failure_id"]
+                        intervention_text = intervention["intervention_text"]
+                        intervention_id = intervention["id"]
+                        print(f"intervention id: {intervention_id} intervention txt: {intervention_text}")
+                        
+                        #add intervention to trajectory
+                        new_intervened_trajectory = add_intervention(transcript["traj"], intervention_text, intervention_id)
+
+                        possible_new_trajectories.append(new_intervened_trajectory)
+
+                        
+                        #Run again but with intervention
+                        res_intervened = agent.solve_with_intervention(
+                            env=isolated_env,
+                            task_index=idx,
+                            messages=new_intervened_trajectory
+                        )
+                        
+
+                        # print("ran new agent task with intervened transcript")
 
 
-                try:
-                    if result.reward == 1.0:
-                        total.append(True)
-                        intervened_succesful_count.append(1.0)
-                        agent_conversation_histories.append({"task_id":idx,"traj":"None. Reward is already 1."})
+                        first_or_last = str(best_of_n_iterator)
+                        # if (best_of_n_iterator == 1):
+                        #     first_or_last = "last"
+                        
+                        #compile result of intervention
                         result_intervened = EnvRunResult(
-                            intervened_message = "no intervention was needed. already passed",
-                            intervened_index = str(-1),
-                            improved = 0,
+                            failure_brief = failure_brief,
+                            failure_index = str(failure_id),
+                            intervened_message = intervention_text,
+                            intervened_first_or_last = first_or_last,
+                            intervened_index = str(intervention_id),
+                            improved = (result.reward == 0 and res_intervened.reward != 0),
+                            success_prev = result.reward,
+                            success_after = res_intervened.reward,
                             task_id=idx,
-                            reward=res.reward,
-                            info=res.info,
-                            traj=res.messages,
+                            reward=res_intervened.reward,
+                            info=res_intervened.info,
+                            traj=res_intervened.messages,
                             trial=i,
                         )
-                        print(f"already passed so no intervention needed. task_id: {idx}")
+                        
+                        if result.reward == 0 and result_intervened.reward != 0:
+                            print(f"***IMPROVED*** task_id={idx} at location={intervention_id}")
+                            does_improve = True
+                        
+                        if result_intervened.reward != 0:
+                            passed_intervened = True
+                            best_intervened_score = max(result_intervened.reward, best_intervened_score)
+
+                    #save result of intervention
                         with lock:
                             data = []
                             if os.path.exists(ckpt_path_intervened):
@@ -143,247 +420,49 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                                     data = json.load(f)
                             with open(ckpt_path_intervened, "w") as f:
                                 json.dump(data + [result_intervened.model_dump()], f, indent=2)
-                            # continue
-                    else:
+                    # if (answer_list[0] != False):
+                    total.append(True)
+                    if (does_improve == True):
+                        improved_count.append(True)
+                    # if (passed_intervened == True):
+                    intervened_succesful_count.append(best_intervened_score)
 
-                        #get intervention possibilites and conv history of intervening agent
-                        answer_list, intervening_agent_conversation = agent.run_intervention(
-                            env=isolated_env,
-                            task_index=idx,
-                            result=result,
-                            N=N
-                        ) 
-                        does_improve = False
-                        passed_intervened = False
-                        best_intervened_score = 0
-                        if (answer_list == None or answer_list[0] == False):
-                            # total.append(True)
-                            intervened_succesful_count.append(0.0)
-                            agent_conversation_histories.append({"task_id":idx,"traj":intervening_agent_conversation})
-                            result_intervened = EnvRunResult(
-                                intervened_message = "no intervention was done",
-                                failure_brief = "no intervention was done",
-                                failure_index = str(-1),
-                                intervened_index = str(-1),
-                                improved = 0,
-                                task_id=idx,
-                                reward=res.reward,
-                                success_prev = result.reward,
-                                success_after = None,
-                                info=res.info,
-                                traj=res.messages,
-                                trial=i,
-                            )
-                            with lock:
-                                    data = []
-                                    if os.path.exists(ckpt_path_intervened):
-                                        with open(ckpt_path_intervened, "r") as f:
-                                            data = json.load(f)
-                                    with open(ckpt_path_intervened, "w") as f:
-                                        json.dump(data + [result_intervened.model_dump()], f, indent=2)
-                            # if (answer_list[0] != False):
-                            total.append(True)
-                            if (does_improve == True):
-                                improved_count.append(True)
-                            # if (passed_intervened == True):
-                            intervened_succesful_count.append(best_intervened_score)
+            # except Exception as e:
+                # result_intervened = EnvRunResult(
+                #     task_id=idx,
+                #     reward=0.0,
+                #     info={"error": str(e), "traceback": traceback.format_exc()},
+                #     traj=[],
+                #     trial=i,
+                # )
+                # print(f"task id: {idx}. error: {e}.")
+                # with lock:
+                #     data = []
+                #     if os.path.exists(ckpt_path_intervened):
+                #         with open(ckpt_path_intervened, "r") as f:
+                #             data = json.load(f)
+                #     with open(ckpt_path_intervened, "w") as f:
+                #         json.dump(data + [result_intervened.model_dump()], f, indent=2)
 
-                            
-                        else:
-                            #add conv history to all conv histories
-                            agent_conversation_histories.append({"task_id":idx,"traj":intervening_agent_conversation})
-
-                            transcript = result.model_dump()
-                            possible_new_trajectories = []
-                            
-
-                            def add_intervention(trajectory, intervention_text, intervention_id):
-                                try:
-                                    if type(intervention_id) == int:
-                                        idx_intervention =  intervention_id  
-                                    else:
-                                        idx_b = -1 if (intervention_id.rfind("B") == -1) else intervention_id.rfind("B")
-                                        idx_intervention = int(intervention_id[idx_b+1:])
-                                except Exception as e:
-                                    print(f"first converting to int idx: {idx} error: {e}.")
-                                    idx_intervention = 1
-
-                                new_trajectory = trajectory[:min(idx_intervention+1, len(trajectory) - 1)]
-                                if (len(trajectory) - 1 < idx_intervention+1):
-                                    print(f"was out of range task id: {idx}")
-                                new_trajectory.append(
-                                    {
-                                        "role":"system",
-                                        "content": "[*INTERVENTION*: " +intervention_text + "]"
-                                    }
-                                )
-
-                                return new_trajectory
-                            
-
-                            # print("possible interventions:", answer_list)
-
-                            
-                            for best_of_n_iterator, intervention in enumerate(answer_list):
-                                try:
-
-                                    intervention_id = intervention["id"]
-                                    if type(intervention_id) == int:
-                                        idx_intervention =  intervention_id  
-                                    else:
-                                        idx_b = -1 if (intervention_id.rfind("B") == -1) else intervention_id.rfind("B")
-                                        if idx_b == -1:
-                                            idx_b = -1 if (intervention_id.rfind("A") == -1) else intervention_id.rfind("A")
-                                        idx_intervention = int(intervention_id[idx_b+1:])
-
-                                except Exception as e:
-                                    print(f"converting to int idx: {idx} error: {e}.")
-                                    idx_intervention = 1
-
-                                answer_list[best_of_n_iterator]["id"] = idx_intervention
-
-                            for best_of_n_iterator, intervention in enumerate(answer_list):
-                                try:
-
-                                    failure_id = intervention["failure_id"]
-                                    if type(failure_id) == int:
-                                        idx_failure =  failure_id  
-                                    else:
-                                        idx_b = -1 if (failure_id.rfind("B") == -1) else failure_id.rfind("B")
-                                        if idx_b == -1:
-                                            idx_b = -1 if (failure_id.rfind("A") == -1) else failure_id.rfind("A")
-                                        idx_failure = int(failure_id[idx_b+1:])
-
-                                except Exception as e:
-                                    print(f"failure id; converting to int idx: {idx} error: {e}.")
-                                    idx_failure = 1
-
-                                answer_list[best_of_n_iterator]["failure_id"] = idx_failure
-
-                            sorted_answer_list = sorted(answer_list, key=lambda x: x['id'])
-                            
-                            # print("sorted possible interventions:", sorted_answer_list)
-
-                            #loop through all intervention possibilites
-                            # for best_of_n_iterator, intervention in enumerate([sorted_answer_list[0], sorted_answer_list[-1]]):
-                            for best_of_n_iterator, intervention in enumerate(sorted_answer_list):
-                                print(f"trying out task id={idx}, intervention {best_of_n_iterator}")
-                                
-                                failure_brief = intervention["failure_brief"]
-                                failure_id = intervention["failure_id"]
-                                intervention_text = intervention["intervention_text"]
-                                intervention_id = intervention["id"]
-                                print(f"intervention id: {intervention_id} intervention txt: {intervention_text}")
-                                
-                                #add intervention to trajectory
-                                new_intervened_trajectory = add_intervention(transcript["traj"], intervention_text, intervention_id)
-
-                                possible_new_trajectories.append(new_intervened_trajectory)
-
-                                
-                                #Run again but with intervention
-                                res_intervened = agent.solve_with_intervention(
-                                    env=isolated_env,
-                                    task_index=idx,
-                                    messages=new_intervened_trajectory
-                                )
-                                
-
-                                # print("ran new agent task with intervened transcript")
-
-
-                                first_or_last = str(best_of_n_iterator)
-                                # if (best_of_n_iterator == 1):
-                                #     first_or_last = "last"
-                                
-                                #compile result of intervention
-                                result_intervened = EnvRunResult(
-                                    failure_brief = failure_brief,
-                                    failure_index = str(failure_id),
-                                    intervened_message = intervention_text,
-                                    intervened_first_or_last = first_or_last,
-                                    intervened_index = str(intervention_id),
-                                    improved = (result.reward == 0 and res_intervened.reward != 0),
-                                    success_prev = result.reward,
-                                    success_after = res_intervened.reward,
-                                    task_id=idx,
-                                    reward=res_intervened.reward,
-                                    info=res_intervened.info,
-                                    traj=res_intervened.messages,
-                                    trial=i,
-                                )
-                                
-                                if result.reward == 0 and result_intervened.reward != 0:
-                                    print(f"***IMPROVED*** task_id={idx} at location={intervention_id}")
-                                    does_improve = True
-                                
-                                if result_intervened.reward != 0:
-                                    passed_intervened = True
-                                    best_intervened_score = max(result_intervened.reward, best_intervened_score)
-
-                            #save result of intervention
-                                with lock:
-                                    data = []
-                                    if os.path.exists(ckpt_path_intervened):
-                                        with open(ckpt_path_intervened, "r") as f:
-                                            data = json.load(f)
-                                    with open(ckpt_path_intervened, "w") as f:
-                                        json.dump(data + [result_intervened.model_dump()], f, indent=2)
-                            # if (answer_list[0] != False):
-                            total.append(True)
-                            if (does_improve == True):
-                                improved_count.append(True)
-                            # if (passed_intervened == True):
-                            intervened_succesful_count.append(best_intervened_score)
-
-                except Exception as e:
-                    result_intervened = EnvRunResult(
-                        task_id=idx,
-                        reward=0.0,
-                        info={"error": str(e), "traceback": traceback.format_exc()},
-                        traj=[],
-                        trial=i,
-                    )
-                    print(f"task id: {idx}. error: {e}.")
-                    with lock:
-                        data = []
-                        if os.path.exists(ckpt_path_intervened):
-                            with open(ckpt_path_intervened, "r") as f:
-                                data = json.load(f)
-                        with open(ckpt_path_intervened, "w") as f:
-                            json.dump(data + [result_intervened.model_dump()], f, indent=2)
-
-                
-                try:
-                    print(
-                        "✅" if result_intervened.reward == 1 else "❌",
-                        f"intervened task_id={idx}",
-                        # result_intervened.info,
-                    )
-                except:
-                    pass
-
-
-
-            with lock:
-                data = []
-                if os.path.exists(ckpt_path):
-                    with open(ckpt_path, "r") as f:
-                        data = json.load(f)
-                with open(ckpt_path, "w") as f:
-                    json.dump(data + [result.model_dump()], f, indent=2)
-
-            # results_intervened.extend
             
-            return result
+            try:
+                print(
+                    "✅" if result_intervened.reward == 1 else "❌",
+                    f"intervened task_id={idx}",
+                    # result_intervened.info,
+                )
+            except:
+                pass
+            
+            return result_intervened
 
-
+        
         with ThreadPoolExecutor(max_workers=config.max_concurrency) as executor:
-            res = executor.map(_run, idxs)
+            res = executor.map(_run, examples)
             res = list(res)
-            results.extend(res)
+            results_intervened.extend(res)
 
-    display_metrics(results)
+    display_metrics(results_intervened)
 
     if (config.run_intervention):
         for leftover in range (max(0, (end_index - config.start_index) - len(intervened_succesful_count))):
@@ -401,14 +480,11 @@ def run(config: RunConfig) -> List[EnvRunResult]:
 
         with open(agent_conv_history_path, 'w') as json_file:
             json.dump(agent_conversation_histories, json_file, indent=4)
-            print(f"Agent conversation history successfully written to '{agent_conv_history_path}'")
+            print(f"Intervention data successfully written to '{intervention_folder}'")
 
 
 
 
-    with open(ckpt_path, "w") as f:
-        json.dump([result.model_dump() for result in results], f, indent=2)
-        print(f"\n📄 Results saved to {ckpt_path}\n")
 
     return results
 

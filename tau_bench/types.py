@@ -85,6 +85,7 @@ class RunConfig(BaseModel):
     user_model_provider: str
     model: str
     user_model: str = "gpt-4o"
+    intervention_model: Optional[str] = "gpt-4o"
     num_trials: int = 1
     env: str = "retail"
     agent_strategy: str = "tool-calling"
@@ -101,3 +102,5 @@ class RunConfig(BaseModel):
     few_shot_displays_path: Optional[str] = None
     best_of_N: Optional[int] = 3
     run_intervention: bool = False
+    baseline_path: Optional[str] = None
+

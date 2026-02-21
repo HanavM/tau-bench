@@ -19,6 +19,16 @@ def parse_args() -> RunConfig:
         help="The model to use for the agent",
     )
     parser.add_argument(
+        "--intervention_model",
+        type=str,
+        help="The model to use for the intervenor agent",
+    )
+    parser.add_argument(
+        "--baseline_path",
+        type=str,
+        help="Path of the baseline results",
+    )
+    parser.add_argument(
         "--model-provider",
         type=str,
         choices=provider_list,
@@ -97,7 +107,10 @@ def parse_args() -> RunConfig:
         user_strategy=args.user_strategy,
         few_shot_displays_path=args.few_shot_displays_path,
         best_of_N=args.best_of_N,
-        run_intervention=args.run_intervention
+        run_intervention=args.run_intervention,
+        baseline_path=args.baseline_path,
+        intervention_model=args.intervention_model
+
     )
 
 
