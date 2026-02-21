@@ -1,5 +1,6 @@
 # Copyright Sierra
 
+import copy
 import json
 from litellm import completion
 from docent import Docent
@@ -75,7 +76,7 @@ class ChatReActAgentIntervened(Agent):
         model: str,
         provider: str,
         use_reasoning: bool = True,
-        temperature: float = 0.0,
+        temperature: float = 1.0,
     ) -> None:
         instruction = REACT_INSTRUCTION if use_reasoning else ACT_INSTRUCTION
         self.prompt = (
@@ -97,6 +98,7 @@ class ChatReActAgentIntervened(Agent):
             temperature=self.temperature,
         )
         message = res.choices[0].message
+        # print("***message:",message)
         action_str = message.content.split("Action:")[-1].strip()
         try:
             action_parsed = json.loads(action_str)
@@ -106,6 +108,13 @@ class ChatReActAgentIntervened(Agent):
                 "name": RESPOND_ACTION_NAME,
                 "arguments": {RESPOND_ACTION_FIELD_NAME: action_str},
             }
+
+        if "name" not in action_parsed or "arguments" not in action_parsed:
+            print(f"Failed message output format: {message}")
+            # with open("failed_messages.txt", "a", encoding="utf-8") as f:
+            #     f.write(str(message))
+            #     f.write("\n" + "-"*80 + "\n")
+            return None, None, None
         assert "name" in action_parsed
         assert "arguments" in action_parsed
         action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
@@ -116,36 +125,46 @@ class ChatReActAgentIntervened(Agent):
     ) -> SolveResult:
         response = env.reset(task_index=task_index)
         reward = 0.0
-        messages: List[Dict[str, Any]] = [
+        messages_og: List[Dict[str, Any]] = [
             {"role": "system", "content": self.prompt},
             {"role": "user", "content": response.observation},
         ]
         # print("here")
-        total_cost = 0.0
-        info = {}
-        for _ in range(max_num_steps):
-            message, action, cost = self.generate_next_step(messages)
-            response = env.step(action)
-            obs = response.observation
-            reward = response.reward
-            info = {**info, **response.info.model_dump()}
-            if action.name != RESPOND_ACTION_NAME:
-                obs = "API output: " + obs
-            # print(obs)
-            messages.extend(
-                [
-                    message,
-                    {"role": "user", "content": obs},
-                ]
+        while True:
+            messages = copy.deepcopy(messages_og)
+            total_cost = 0.0
+            info = {}
+            restart = False
+            for _ in range(max_num_steps):
+                message, action, cost = self.generate_next_step(messages)
+                if message == None or action == None or cost == None:
+                    print(f"restarting it, {task_index}")
+                    restart = True
+                    break
+                response = env.step(action)
+                obs = response.observation
+                reward = response.reward
+                info = {**info, **response.info.model_dump()}
+                if action.name != RESPOND_ACTION_NAME:
+                    obs = "API output: " + obs
+                # print(obs)
+                messages.extend(
+                    [
+                        message,
+                        {"role": "user", "content": obs},
+                    ]
+                )
+                total_cost += cost
+                if response.done:
+                    break
+            if restart:
+                continue
+            return SolveResult(
+                messages=messages,
+                reward=reward,
+                info=info,
             )
-            total_cost += cost
-            if response.done:
-                break
-        return SolveResult(
-            messages=messages,
-            reward=reward,
-            info=info,
-        )
+
 
     def add_intervention(trajectory, intervention_text, intervention_id):
         if type(intervention_id) == int:
@@ -257,10 +276,12 @@ class ChatReActAgentIntervened(Agent):
         try: 
             val = (transcript["traj"][0])
         except Exception as e:
-            print("mcdonalds here error: {e},", transcript["traj"])
+            print(f"mcdonalds here error: {e},", transcript["traj"])
         # print("transcript sdfasdf:",transcript["traj"])
         specification, metadata, user_task = load_TAU_reAct_extra_data(transcript)
         agent_run_docent = load_TAU_Reasoning_inspect_log([transcript])
+
+        transcript_length = len(transcript["traj"])
 
         print("N:", N)
 
@@ -268,7 +289,7 @@ class ChatReActAgentIntervened(Agent):
         conversation_history = []
         conversation_history.append({
             "role": "system",
-            "content": questioning_agent_prompt_working_backwards.format(specification=specification, ref_metadata=user_task, N=N),
+            "content": questioning_agent_prompt_working_backwards.format(specification=specification, ref_metadata=user_task, N=N, transcript_length = transcript_length),
         })   
         
         turns = 0
@@ -557,33 +578,42 @@ class ChatReActAgentIntervened(Agent):
         self, messages, env: Env, task_index: Optional[int] = None, max_num_steps: int = 30
     ) -> SolveResult:
         response = env.reset(task_index=task_index)
-        reward = 0.0
-    
-    
-        total_cost = 0.0
-        info = {}
-        for _ in range(max_num_steps):
-            message, action, cost = self.generate_next_step(messages)
-            response = env.step(action)
-            obs = response.observation
-            reward = response.reward
-            info = {**info, **response.info.model_dump()}
-            if action.name != RESPOND_ACTION_NAME:
-                obs = "API output: " + obs
-            messages.extend(
-                [
-                    message,
-                    {"role": "user", "content": obs},
-                ]
+        while True:
+            messages_new = copy.deepcopy(messages)
+            reward = 0.0
+            total_cost = 0.0
+            info = {}
+            restart = False
+
+
+            for _ in range(max_num_steps):
+                message, action, cost = self.generate_next_step(messages_new)
+                if (message == None and action == None and cost == None):
+                    print(f"restarting intervened task {task_index}")
+                    restart = True
+                    break
+                response = env.step(action)
+                obs = response.observation
+                reward = response.reward
+                info = {**info, **response.info.model_dump()}
+                if action.name != RESPOND_ACTION_NAME:
+                    obs = "API output: " + obs
+                messages_new.extend(
+                    [
+                        message,
+                        {"role": "user", "content": obs},
+                    ]
+                )
+                total_cost += cost
+                if response.done:
+                    break
+            if (restart):
+                continue
+            return SolveResult(
+                messages=messages_new,
+                reward=reward,
+                info=info,
             )
-            total_cost += cost
-            if response.done:
-                break
-        return SolveResult(
-            messages=messages,
-            reward=reward,
-            info=info,
-        )
     
 
 

@@ -1,5 +1,3 @@
-# Copyright Sierra
-
 import os
 import json
 import random
@@ -233,10 +231,10 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                                     if type(intervention_id) == int:
                                         idx_intervention =  intervention_id  
                                     else:
-                                        idx_b = -1 if (failure_id.rfind("B") == -1) else failure_id.rfind("B")
+                                        idx_b = -1 if (intervention_id.rfind("B") == -1) else intervention_id.rfind("B")
                                         if idx_b == -1:
-                                            idx_b = -1 if (failure_id.rfind("A") == -1) else failure_id.rfind("A")
-                                        idx_failure = int(failure_id[idx_b+1:])
+                                            idx_b = -1 if (intervention_id.rfind("A") == -1) else intervention_id.rfind("A")
+                                        idx_intervention = int(intervention_id[idx_b+1:])
 
                                 except Exception as e:
                                     print(f"converting to int idx: {idx} error: {e}.")

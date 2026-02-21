@@ -426,6 +426,8 @@ Once you have determined these root failure points, move to step 2.
 
 To do so, go through the root failure points you created and explicitly noted in step 1. For each one, assess whether the primary agent's failure can be avoided if provided with some insight. If possible to avoid, note a very brief explanation of the specific failure and at what transcript index it occured at. Then, create an message that informs the primary agent as to not make that failure, and note at what index in the transcript that message should be inserted. Repeat this process until you determine {N} possible interventions that will each independently improve the primary agent's performance. Note that these interventions are independent, so only one intervention will be implemented at a time and thus, your {N} interventions should not build off of one another. 
 
+Note that the transcript's length is {transcript_length}, so none of the failure ids or intervention ids should be larger than {transcript_length}. Additionally, note that the primary agent only responds on even index (given that you are processing the transcript in zero-index format), so no failure point should be odd.  
+
 You must output your {N} interventions as a list of {N} JSON elements, where each element has the fields "failure_brief" (the brief explanation of the failure), "failure_id" (the integer transcript index of the failure), "intervention_text" (the text inserted to inform the primary agent to avoid the failure), and "id" (the integer transcript index where the intervention should be inserted). Print out that list between <answer> and </answer> tags, as seen in the example below.
 
 <answer>
