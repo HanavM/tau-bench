@@ -1,4 +1,4 @@
-As part of the University of California, San Francisco [Abbasi Laboratory]((https://abbasilab.org/)), Hanav Modasiya (intern), Dr. Patrick Xian, and Dr. Reza Abbasi-Asl developed a framework for implementing stochastic behavioral interventions on multi-turn LLM agents.
+As part of the University of California, San Francisco [Abbasi Laboratory]([url](https://abbasilab.org/)), Hanav Modasiya (intern), Dr. Patrick Xian, and Dr. Reza Abbasi-Asl developed a framework for implementing stochastic behavioral interventions on multi-turn LLM agents.
 
 The paper is currently under review, but the premise is that we developed an agent that recursively determines N failure points in a multi-turn LLM agent's reasoning trajectory and plans N behavioral interventions to combat those failure points. 
 
