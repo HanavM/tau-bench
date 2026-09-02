@@ -3,6 +3,8 @@
 import copy
 import json
 from litellm import completion
+from litellm.exceptions import BadRequestError
+from tau_bench.llm_utils import completion_with_backoff
 from docent import Docent
 
 from openai import OpenAI
@@ -77,6 +79,9 @@ class ChatReActAgentIntervened(Agent):
         provider: str,
         use_reasoning: bool = True,
         temperature: float = 1.0,
+        intervenor_temperature: float = 0.2,
+        intervention_model: str = "gpt-4o-mini-2024-07-18",
+        intervention_provider: str = "openai",
     ) -> None:
         instruction = REACT_INSTRUCTION if use_reasoning else ACT_INSTRUCTION
         self.prompt = (
@@ -85,18 +90,55 @@ class ChatReActAgentIntervened(Agent):
         self.model = model
         self.provider = provider
         self.temperature = temperature
+        self.intervenor_temperature = intervenor_temperature
+        self.intervention_model = intervention_model
+        self.intervention_provider = intervention_provider
         self.use_reasoning = use_reasoning
         self.tools_info = tools_info
+
+    @staticmethod
+    def _strict_order_compat(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Rewrite a resumed trajectory for providers (e.g. Mistral) that reject
+        conversations not ending in a user/tool message.
+
+        Mid-conversation system messages (the inserted [*INTERVENTION*...] text)
+        become user messages with identical content, and a trailing assistant
+        message is dropped so the model regenerates that step instead of
+        continuing after it.
+        """
+        msgs = []
+        for i, m in enumerate(messages):
+            content = m.get("content")
+            if not content:
+                tc = m.get("tool_calls") or m.get("function_call")
+                content = json.dumps(tc, default=str) if tc else "(empty)"
+            clean = {"role": m.get("role", "user"), "content": content}
+            if i > 0 and clean["role"] == "system":
+                clean["role"] = "user"
+            msgs.append(clean)
+        while msgs and msgs[-1].get("role") == "assistant":
+            msgs.pop()
+        return msgs
 
     def generate_next_step(
         self, messages: List[Dict[str, Any]]
     ) -> Tuple[Dict[str, Any], Action, float]:
-        res = completion(
-            model=self.model,
-            custom_llm_provider=self.provider,
-            messages=messages,
-            temperature=self.temperature,
-        )
+        try:
+            res = completion_with_backoff(
+                model=self.model,
+                custom_llm_provider=self.provider,
+                messages=messages,
+                temperature=self.temperature,
+            )
+        except BadRequestError:
+            # retry once with a sanitized trajectory; harmless if it was not
+            # a message-format rejection (the same error just re-raises)
+            res = completion_with_backoff(
+                model=self.model,
+                custom_llm_provider=self.provider,
+                messages=self._strict_order_compat(messages),
+                temperature=self.temperature,
+            )
         message = res.choices[0].message
         # print("***message:",message)
         action_str = message.content.split("Action:")[-1].strip()
@@ -118,7 +160,7 @@ class ChatReActAgentIntervened(Agent):
         assert "name" in action_parsed
         assert "arguments" in action_parsed
         action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
-        return message.model_dump(), action, res._hidden_params["response_cost"]
+        return message.model_dump(), action, (res._hidden_params.get("response_cost") or 0.0)
 
     def solve(
         self, env: Env, task_index: Optional[int] = None, max_num_steps: int = 30
@@ -208,17 +250,17 @@ class ChatReActAgentIntervened(Agent):
 
                 for idx, message in enumerate(sample["traj"]):
                     if message["role"] == "tool":
-                        messages.append(ToolMessage(id = str(idx),content=message["content"], tool_call_id=message["tool_call_id"], function=message["name"]))
+                        messages.append(ToolMessage(id = str(idx),content=message["content"], tool_call_id=message.get("tool_call_id", ""), function=message.get("name", "")))
 
                     elif message["role"] == "assistant":
                         contentstr = message["content"]
                         if contentstr == None:
                             contentstr = ""
-                        if message["tool_calls"]:
+                        if message.get("tool_calls"):
                             contentstr += json.dumps(message["tool_calls"], indent=2)
-                        if message["function_call"]:
+                        if message.get("function_call"):
                             contentstr += str(message["function_call"])
-                        if message["annotations"]:
+                        if message.get("annotations"):
                             contentstr += message["annotations"]
 
                         messages.append(AssistantMessage(id = str(idx),content=contentstr))
@@ -242,16 +284,18 @@ class ChatReActAgentIntervened(Agent):
 
         def execute_search(text, query, model):
 
-            response = openai.chat.completions.create(
-                model="gpt-4o-mini-2024-07-18",
+            response = completion(
+                model=self.intervention_model,
+                custom_llm_provider=self.intervention_provider,
+                num_retries=5,
                 messages=[{"role": "user","content":SEARCH_PROMPT.format(text=text, search_query=query, SINGLE_RUN_CITE_INSTRUCTION=SINGLE_RUN_CITE_INSTRUCTION)}],
                 max_completion_tokens=4096,
-                temperature = 1.0
+                temperature = self.intervenor_temperature
             )
 
 
 
-            return response.choices[0].message.content.strip()
+            return (response.choices[0].message.content or "").strip()
 
         def load_TAU_reAct_extra_data(transcript):
             return transcript["traj"][0], transcript["info"]["reward_info"], transcript["info"]["task"]
@@ -298,14 +342,16 @@ class ChatReActAgentIntervened(Agent):
             try:
                 turns+=1
                 # print("turn:", turns)
-                response = openai.chat.completions.create(
-                    model="gpt-4o-mini-2024-07-18",
+                response = completion(
+                    model=self.intervention_model,
+                    custom_llm_provider=self.intervention_provider,
+                    num_retries=5,
                     messages=conversation_history,
                     max_completion_tokens=4096,
-                    temperature=1.0
+                    temperature=self.intervenor_temperature
                 )
 
-                reply = response.choices[0].message.content.strip()
+                reply = (response.choices[0].message.content or "").strip()
                 match = re.search(r'<query>(.*?)</query>', reply, re.DOTALL)
 
                 conversation_history.append({
@@ -396,17 +442,17 @@ class ChatReActAgentIntervened(Agent):
 
                 for idx, message in enumerate(sample["traj"]):
                     if message["role"] == "tool":
-                        messages.append(ToolMessage(id = str(idx),content=message["content"], tool_call_id=message["tool_call_id"], function=message["name"]))
+                        messages.append(ToolMessage(id = str(idx),content=message["content"], tool_call_id=message.get("tool_call_id", ""), function=message.get("name", "")))
 
                     elif message["role"] == "assistant":
                         contentstr = message["content"]
                         if contentstr == None:
                             contentstr = ""
-                        if message["tool_calls"]:
+                        if message.get("tool_calls"):
                             contentstr += json.dumps(message["tool_calls"], indent=2)
-                        if message["function_call"]:
+                        if message.get("function_call"):
                             contentstr += str(message["function_call"])
-                        if message["annotations"]:
+                        if message.get("annotations"):
                             contentstr += message["annotations"]
 
                         messages.append(AssistantMessage(id = str(idx),content=contentstr))
@@ -430,16 +476,18 @@ class ChatReActAgentIntervened(Agent):
 
         def execute_search(text, query, model):
 
-            response = openai.chat.completions.create(
-                model="gpt-4o-mini-2024-07-18",
+            response = completion(
+                model=self.intervention_model,
+                custom_llm_provider=self.intervention_provider,
+                num_retries=5,
                 messages=[{"role": "user","content":SEARCH_PROMPT.format(text=text, search_query=query, SINGLE_RUN_CITE_INSTRUCTION=SINGLE_RUN_CITE_INSTRUCTION)}],
                 max_completion_tokens=4096,
-                temperature = 1.0
+                temperature = self.intervenor_temperature
             )
 
 
 
-            return response.choices[0].message.content.strip()
+            return (response.choices[0].message.content or "").strip()
 
         def load_TAU_reAct_extra_data(transcript):
             return transcript["traj"][0], transcript["info"]["reward_info"], transcript["info"]["task"]
@@ -478,15 +526,17 @@ class ChatReActAgentIntervened(Agent):
             # break
             turns += 1
             print("turn:", turns)
-            response = openai.chat.completions.create(
-                model="gpt-4o-mini-2024-07-18",
+            response = completion(
+                model=self.intervention_model,
+                custom_llm_provider=self.intervention_provider,
+                num_retries=5,
                 messages=conversation_history,
                 max_completion_tokens=4096,
-                temperature=1.0
+                temperature=self.intervenor_temperature
             )
 
             
-            reply = response.choices[0].message.content.strip()
+            reply = (response.choices[0].message.content or "").strip()
 
             # print(reply)
 

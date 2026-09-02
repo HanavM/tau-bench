@@ -3,6 +3,7 @@
 import json
 from litellm import completion
 
+from tau_bench.llm_utils import completion_with_backoff
 from tau_bench.agents.base import Agent
 from tau_bench.envs.base import Env
 from tau_bench.types import (
@@ -37,11 +38,12 @@ class ChatReActAgent(Agent):
     def generate_next_step(
         self, messages: List[Dict[str, Any]]
     ) -> Tuple[Dict[str, Any], Action, float]:
-        res = completion(
+        res = completion_with_backoff(
             model=self.model,
             custom_llm_provider=self.provider,
             messages=messages,
             temperature=self.temperature,
+            num_retries=5,
         )
         message = res.choices[0].message
         action_str = message.content.split("Action:")[-1].strip()
@@ -56,7 +58,7 @@ class ChatReActAgent(Agent):
         assert "name" in action_parsed
         assert "arguments" in action_parsed
         action = Action(name=action_parsed["name"], kwargs=action_parsed["arguments"])
-        return message.model_dump(), action, res._hidden_params["response_cost"]
+        return message.model_dump(), action, (res._hidden_params.get("response_cost") or 0.0)
 
     def solve(
         self, env: Env, task_index: Optional[int] = None, max_num_steps: int = 30

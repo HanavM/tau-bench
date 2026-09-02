@@ -1,10 +1,11 @@
 import os
+import glob
 import json
 import random
 import traceback
 from math import comb
 import multiprocessing
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
@@ -15,128 +16,200 @@ from litellm import provider_list
 from tau_bench.envs.user import UserStrategy
 
 
+def find_existing_baseline_folder(config: RunConfig, seed: int) -> Optional[str]:
+    """Find a previously-created baseline run folder for this exact config
+    (model/agent/env/range/user/seed), ignoring the timestamp suffix, so a
+    rerun can resume it instead of starting a fresh folder from scratch.
+    """
+    prefix = f"{config.agent_strategy}-{config.model.split('/')[-1]}-{config.temperature}_range_{config.start_index}-{config.end_index}_user-{config.user_model}-{config.user_strategy}_seed-{seed}_"
+    matches = sorted(glob.glob(os.path.join(config.log_dir, prefix + "*")))
+    return matches[-1] if matches else None
+
+
+def run_baseline(config: RunConfig, existing_folder: Optional[str] = None) -> List[EnvRunResult]:
+    random.seed(config.seed)
+
+    if not os.path.exists(config.log_dir):
+        os.makedirs(config.log_dir)
+
+    if existing_folder and os.path.exists(existing_folder):
+        ckpt_folder = existing_folder
+        print(f"Resuming existing baseline run folder: {ckpt_folder}")
+    else:
+        time_str = datetime.now().strftime("%m%d%H%M%S")
+        ckpt_folder = f"{config.log_dir}/{config.agent_strategy}-{config.model.split('/')[-1]}-{config.temperature}_range_{config.start_index}-{config.end_index}_user-{config.user_model}-{config.user_strategy}_seed-{config.seed}_{time_str}"
+        os.makedirs(ckpt_folder)
+    ckpt_path = ckpt_folder + "/transcript.json"
+
+    existing_results: List[EnvRunResult] = []
+    if os.path.exists(ckpt_path):
+        with open(ckpt_path, "r") as f:
+            existing_results = [EnvRunResult(**r) for r in json.load(f)]
+    done_task_ids_by_trial: Dict[int, set] = {}
+    for r in existing_results:
+        done_task_ids_by_trial.setdefault(r.trial, set()).add(r.task_id)
+
+    print(f"running baseline (seed={config.seed})")
+    print(f"Loading user with strategy: {config.user_strategy}")
+    env = get_env(
+        config.env,
+        user_strategy=config.user_strategy,
+        user_model=config.user_model,
+        user_provider=config.user_model_provider,
+        task_split=config.task_split,
+    )
+    agent = agent_factory(
+        tools_info=env.tools_info,
+        wiki=env.wiki,
+        config=config,
+    )
+    end_index = (
+        len(env.tasks) if config.end_index == -1 else min(config.end_index, len(env.tasks))
+    )
+    results: List[EnvRunResult] = []
+    lock = multiprocessing.Lock()
+    if config.task_ids and len(config.task_ids) > 0:
+        print(f"Running tasks {config.task_ids} (checkpoint path: {ckpt_path})")
+    else:
+        print(
+            f"Running tasks {config.start_index} to {end_index} (checkpoint path: {ckpt_path})"
+    )
+    for i in range(config.num_trials):
+        if config.task_ids and len(config.task_ids) > 0:
+            all_idxs = config.task_ids
+        else:
+            all_idxs = list(range(config.start_index, end_index))
+        # if config.shuffle:
+        #     random.shuffle(idxs)
+        # print("idxs:",idxs)
+
+        already_done = done_task_ids_by_trial.get(i, set())
+        idxs = [idx for idx in all_idxs if idx not in already_done]
+        if already_done:
+            print(f"Trial {i}: {len(already_done)} task(s) already completed, {len(idxs)} remaining")
+        if not idxs:
+            continue
+
+        print(f"N from config {config.best_of_N}")
+
+        def _run(idx: int, N=config.best_of_N) -> EnvRunResult:
+
+            isolated_env = get_env(
+                config.env,
+                user_strategy=config.user_strategy,
+                user_model=config.user_model,
+                task_split=config.task_split,
+                user_provider=config.user_model_provider,
+                task_index=idx,
+            )
+
+            print(f"Running task {idx}")
+            try:
+                res = agent.solve(
+                    env=isolated_env,
+                    task_index=idx,
+                )
+                result = EnvRunResult(
+                    task_id=idx,
+                    reward=res.reward,
+                    info=res.info,
+                    traj=res.messages,
+                    trial=i,
+                )
+            except Exception as e:
+                result = EnvRunResult(
+                    task_id=idx,
+                    reward=0.0,
+                    info={"error": str(e), "traceback": traceback.format_exc()},
+                    traj=[],
+                    trial=i,
+                )
+            print(
+                "✅" if result.reward == 1 else "❌",
+                f"task_id={idx}",
+                # result.info,
+            )
+            print("-----")
+            with lock:
+                data = []
+                if os.path.exists(ckpt_path):
+                    with open(ckpt_path, "r") as f:
+                        data = json.load(f)
+                with open(ckpt_path, "w") as f:
+                    json.dump(data + [result.model_dump()], f, indent=2)
+
+            # results_intervened.extend
+
+            return result
+
+
+        with ThreadPoolExecutor(max_workers=config.max_concurrency) as executor:
+            res = executor.map(_run, idxs)
+            res = list(res)
+            results.extend(res)
+
+    results = existing_results + results
+
+    display_metrics(results)
+
+    with open(ckpt_path, "w") as f:
+        json.dump([result.model_dump() for result in results], f, indent=2)
+        print(f"\n📄 Results saved to {ckpt_path}\n")
+
+    return results
+
+
+def run_baseline_n_times(config: RunConfig, input_path: str) -> List[List[EnvRunResult]]:
+    """Re-run an already-completed baseline evaluation additional times, so
+    it can be compared against an intervention run.
+
+    `input_path` should point at the folder of the baseline run that was
+    already completed with seed=config.seed (the same seed that will be/was
+    used for the intervention run). That run is left untouched. This
+    function performs config.num_trials - 1 additional full baseline runs,
+    each with its own distinct seed, each written to its own new folder
+    under config.log_dir. Each individual seed run is exactly 1 trial —
+    config.num_trials only controls how many distinct seeds are produced
+    here, not how many times each seed's task set is repeated.
+
+    Reruns of this function skip seeds whose folder already has every task
+    completed, and resume (only running the missing task IDs) for seeds
+    whose folder exists but is incomplete.
+    """
+    assert config.num_trials >= 1, "num_trials must be >= 1"
+    assert os.path.exists(input_path), f"input_path does not exist: {input_path}"
+
+    base_seed = config.seed
+    new_seeds = [base_seed + i for i in range(1, config.num_trials)]
+
+    print(f"Already-completed baseline run (seed={base_seed}): {input_path}")
+    print(f"Running {len(new_seeds)} additional baseline run(s) with seeds: {new_seeds}")
+
+    all_results: List[List[EnvRunResult]] = []
+    for seed in new_seeds:
+        run_config = config.model_copy(update={"seed": seed, "run_intervention": False, "num_trials": 1})
+        existing_folder = find_existing_baseline_folder(run_config, seed)
+        if existing_folder:
+            print(f"Seed {seed}: found existing folder {existing_folder}, resuming any incomplete tasks")
+        results = run_baseline(run_config, existing_folder=existing_folder)
+        all_results.append(results)
+
+    return all_results
+
+
 def run(config: RunConfig) -> List[EnvRunResult]:
     assert config.env in ["retail", "airline"], "Only retail and airline envs are supported"
     assert config.model_provider in provider_list, "Invalid model provider"
     assert config.user_model_provider in provider_list, "Invalid user model provider"
-    assert config.agent_strategy in ["tool-calling", "act", "react", "few-shot", "react-intervened"], "Invalid agent strategy"
+    assert config.agent_strategy in ["tool-calling", "act", "react", "few-shot", "react-intervened", "react-reflexion"], "Invalid agent strategy"
     assert config.task_split in ["train", "test", "dev"], "Invalid task split"
     assert config.user_strategy in [item.value for item in UserStrategy], "Invalid user strategy"
-    
+
     random.seed(config.seed)
     time_str = datetime.now().strftime("%m%d%H%M%S")
 
-
     if (not config.run_intervention):
-        # run baseline 
-        ckpt_folder = f"{config.log_dir}/{config.agent_strategy}-{config.model.split('/')[-1]}-{config.temperature}_range_{config.start_index}-{config.end_index}_user-{config.user_model}-{config.user_strategy}_{time_str}"
-        os.makedirs(ckpt_folder)
-        ckpt_path = ckpt_folder + "/transcript.json"
-        
-        if not os.path.exists(config.log_dir):
-            os.makedirs(config.log_dir)
-        
-        print("running baseline")
-        print(f"Loading user with strategy: {config.user_strategy}")
-        env = get_env(
-            config.env,
-            user_strategy=config.user_strategy,
-            user_model=config.user_model,
-            user_provider=config.user_model_provider,
-            task_split=config.task_split,
-        )
-        agent = agent_factory(
-            tools_info=env.tools_info,
-            wiki=env.wiki,
-            config=config,
-        )
-        end_index = (
-            len(env.tasks) if config.end_index == -1 else min(config.end_index, len(env.tasks))
-        )
-        results: List[EnvRunResult] = []
-        lock = multiprocessing.Lock()
-        if config.task_ids and len(config.task_ids) > 0:
-            print(f"Running tasks {config.task_ids} (checkpoint path: {ckpt_path})")
-        else:
-            print(
-                f"Running tasks {config.start_index} to {end_index} (checkpoint path: {ckpt_path})"
-        )
-        for i in range(config.num_trials):
-            if config.task_ids and len(config.task_ids) > 0:
-                idxs = config.task_ids
-            else:
-                idxs = list(range(config.start_index, end_index))
-            # if config.shuffle:
-            #     random.shuffle(idxs)
-            # print("idxs:",idxs)
-            print(f"N from config {config.best_of_N}")
-
-            def _run(idx: int, N=config.best_of_N) -> EnvRunResult:
-            
-                isolated_env = get_env(
-                    config.env,
-                    user_strategy=config.user_strategy,
-                    user_model=config.user_model,
-                    task_split=config.task_split,
-                    user_provider=config.user_model_provider,
-                    task_index=idx,
-                )
-
-                print(f"Running task {idx}")
-                try:
-                    res = agent.solve(
-                        env=isolated_env,
-                        task_index=idx,
-                    )
-                    result = EnvRunResult(
-                        task_id=idx,
-                        reward=res.reward,
-                        info=res.info,
-                        traj=res.messages,
-                        trial=i,
-                    )
-                except Exception as e:
-                    result = EnvRunResult(
-                        task_id=idx,
-                        reward=0.0,
-                        info={"error": str(e), "traceback": traceback.format_exc()},
-                        traj=[],
-                        trial=i,
-                    )
-                print(
-                    "✅" if result.reward == 1 else "❌",
-                    f"task_id={idx}",
-                    # result.info,
-                )
-                print("-----")
-                with lock:
-                    data = []
-                    if os.path.exists(ckpt_path):
-                        with open(ckpt_path, "r") as f:
-                            data = json.load(f)
-                    with open(ckpt_path, "w") as f:
-                        json.dump(data + [result.model_dump()], f, indent=2)
-
-                # results_intervened.extend
-                
-                return result
-
-
-            with ThreadPoolExecutor(max_workers=config.max_concurrency) as executor:
-                res = executor.map(_run, idxs)
-                res = list(res)
-                results.extend(res)
-
-        display_metrics(results)
-        
-        with open(ckpt_path, "w") as f:
-            json.dump([result.model_dump() for result in results], f, indent=2)
-            print(f"\n📄 Results saved to {ckpt_path}\n")
-
-        return results
-
-
-
+        return run_baseline(config)
 
     #Run interventions
     baseline_path = config.baseline_path
@@ -151,6 +224,8 @@ def run(config: RunConfig) -> List[EnvRunResult]:
     with open(baseline_path + "/transcript.json","r", encoding="utf-8") as json_file:
         examples = json.load(json_file)
 
+    if config.task_ids and len(config.task_ids) > 0:
+        examples = [e for e in examples if e["task_id"] in set(config.task_ids)]
 
     if not os.path.exists(config.log_dir):
         os.makedirs(config.log_dir)
@@ -209,22 +284,233 @@ def run(config: RunConfig) -> List[EnvRunResult]:
 
             print(f"Running interventions on {idx}")
 
-            # try:
-            if result.reward == 1.0:
-                total.append(True)
-                intervened_succesful_count.append(1.0)
-                agent_conversation_histories.append({"task_id":idx,"traj":"None. Reward is already 1."})
+            try:
+                if result.reward == 1.0:
+                    total.append(True)
+                    intervened_succesful_count.append(1.0)
+                    agent_conversation_histories.append({"task_id":idx,"traj":"None. Reward is already 1."})
+                    result_intervened = EnvRunResult(
+                        intervened_message = "no intervention was needed. already passed",
+                        intervened_index = str(-1),
+                        improved = 0,
+                        task_id=idx,
+                        reward=result.reward,
+                        info=result.info,
+                        traj=result.traj,
+                        trial=i,
+                    )
+                    print(f"already passed so no intervention needed. task_id: {idx}")
+                    with lock:
+                        data = []
+                        if os.path.exists(ckpt_path_intervened):
+                            with open(ckpt_path_intervened, "r") as f:
+                                data = json.load(f)
+                        with open(ckpt_path_intervened, "w") as f:
+                            json.dump(data + [result_intervened.model_dump()], f, indent=2)
+                        # continue
+                else:
+
+                    #get intervention possibilites and conv history of intervening agent
+                    print(f"determining interventions right now {idx}")
+                    answer_list, intervening_agent_conversation = agent.run_intervention(
+                        env=isolated_env,
+                        task_index=idx,
+                        result=result,
+                        N=N
+                    ) 
+                    print(f"done {idx}")
+                    does_improve = False
+                    passed_intervened = False
+                    best_intervened_score = 0
+                    if (answer_list == None or answer_list[0] == False):
+                        # total.append(True)
+                        intervened_succesful_count.append(0.0)
+                        agent_conversation_histories.append({"task_id":idx,"traj":intervening_agent_conversation})
+                        result_intervened = EnvRunResult(
+                            intervened_message = "no intervention was done",
+                            failure_brief = "no intervention was done",
+                            failure_index = str(-1),
+                            intervened_index = str(-1),
+                            improved = 0,
+                            task_id=idx,
+                            reward=result.reward,
+                            success_prev = result.reward,
+                            success_after = None,
+                            info=result.info,
+                            traj=result.traj,
+                            trial=i,
+                        )
+                        with lock:
+                                data = []
+                                if os.path.exists(ckpt_path_intervened):
+                                    with open(ckpt_path_intervened, "r") as f:
+                                        data = json.load(f)
+                                with open(ckpt_path_intervened, "w") as f:
+                                    json.dump(data + [result_intervened.model_dump()], f, indent=2)
+                        # if (answer_list[0] != False):
+                        total.append(True)
+                        if (does_improve == True):
+                            improved_count.append(True)
+                        # if (passed_intervened == True):
+                        intervened_succesful_count.append(best_intervened_score)
+
+                        
+                    else:
+                        #add conv history to all conv histories
+                        agent_conversation_histories.append({"task_id":idx,"traj":intervening_agent_conversation})
+
+                        transcript = result.model_dump()
+                        possible_new_trajectories = []
+                        
+
+                        def add_intervention(trajectory, intervention_text, intervention_id):
+                            try:
+                                if type(intervention_id) == int:
+                                    idx_intervention =  intervention_id  
+                                else:
+                                    idx_b = -1 if (intervention_id.rfind("B") == -1) else intervention_id.rfind("B")
+                                    idx_intervention = int(intervention_id[idx_b+1:])
+                            except Exception as e:
+                                print(f"first converting to int idx: {idx} error: {e}.")
+                                idx_intervention = 1
+
+                            new_trajectory = trajectory[:min(idx_intervention+1, len(trajectory) - 1)]
+                            if (len(trajectory) - 1 < idx_intervention+1):
+                                print(f"was out of range task id: {idx}")
+                            new_trajectory.append(
+                                {
+                                    "role":"system",
+                                    "content": "[*INTERVENTION*: " +intervention_text + "]"
+                                }
+                            )
+
+                            return new_trajectory
+                        
+
+                        # print("possible interventions:", answer_list)
+
+                        
+                        for best_of_n_iterator, intervention in enumerate(answer_list):
+                            try:
+
+                                intervention_id = intervention["id"]
+                                if type(intervention_id) == int:
+                                    idx_intervention =  intervention_id  
+                                else:
+                                    idx_b = -1 if (intervention_id.rfind("B") == -1) else intervention_id.rfind("B")
+                                    if idx_b == -1:
+                                        idx_b = -1 if (intervention_id.rfind("A") == -1) else intervention_id.rfind("A")
+                                    idx_intervention = int(intervention_id[idx_b+1:])
+
+                            except Exception as e:
+                                print(f"converting to int idx: {idx} error: {e}.")
+                                idx_intervention = 1
+
+                            answer_list[best_of_n_iterator]["id"] = idx_intervention
+
+                        for best_of_n_iterator, intervention in enumerate(answer_list):
+                            try:
+
+                                failure_id = intervention["failure_id"]
+                                if type(failure_id) == int:
+                                    idx_failure =  failure_id  
+                                else:
+                                    idx_b = -1 if (failure_id.rfind("B") == -1) else failure_id.rfind("B")
+                                    if idx_b == -1:
+                                        idx_b = -1 if (failure_id.rfind("A") == -1) else failure_id.rfind("A")
+                                    idx_failure = int(failure_id[idx_b+1:])
+
+                            except Exception as e:
+                                print(f"failure id; converting to int idx: {idx} error: {e}.")
+                                idx_failure = 1
+
+                            answer_list[best_of_n_iterator]["failure_id"] = idx_failure
+
+                        sorted_answer_list = sorted(answer_list, key=lambda x: x['id'])
+                        
+                        # print("sorted possible interventions:", sorted_answer_list)
+
+                        #loop through all intervention possibilites
+                        # for best_of_n_iterator, intervention in enumerate([sorted_answer_list[0], sorted_answer_list[-1]]):
+                        for best_of_n_iterator, intervention in enumerate(sorted_answer_list):
+                            print(f"trying out task id={idx}, intervention {best_of_n_iterator}")
+                            
+                            failure_brief = intervention["failure_brief"]
+                            failure_id = intervention["failure_id"]
+                            intervention_text = intervention["intervention_text"]
+                            intervention_id = intervention["id"]
+                            print(f"intervention id: {intervention_id} intervention txt: {intervention_text}")
+                            
+                            #add intervention to trajectory
+                            new_intervened_trajectory = add_intervention(transcript["traj"], intervention_text, intervention_id)
+
+                            possible_new_trajectories.append(new_intervened_trajectory)
+
+                            
+                            #Run again but with intervention
+                            res_intervened = agent.solve_with_intervention(
+                                env=isolated_env,
+                                task_index=idx,
+                                messages=new_intervened_trajectory
+                            )
+                            
+
+                            # print("ran new agent task with intervened transcript")
+
+
+                            first_or_last = str(best_of_n_iterator)
+                            # if (best_of_n_iterator == 1):
+                            #     first_or_last = "last"
+                            
+                            #compile result of intervention
+                            result_intervened = EnvRunResult(
+                                failure_brief = failure_brief,
+                                failure_index = str(failure_id),
+                                intervened_message = intervention_text,
+                                intervened_first_or_last = first_or_last,
+                                intervened_index = str(intervention_id),
+                                improved = (result.reward == 0 and res_intervened.reward != 0),
+                                success_prev = result.reward,
+                                success_after = res_intervened.reward,
+                                task_id=idx,
+                                reward=res_intervened.reward,
+                                info=res_intervened.info,
+                                traj=res_intervened.messages,
+                                trial=i,
+                            )
+                            
+                            if result.reward == 0 and result_intervened.reward != 0:
+                                print(f"***IMPROVED*** task_id={idx} at location={intervention_id}")
+                                does_improve = True
+                            
+                            if result_intervened.reward != 0:
+                                passed_intervened = True
+                                best_intervened_score = max(result_intervened.reward, best_intervened_score)
+
+                        #save result of intervention
+                            with lock:
+                                data = []
+                                if os.path.exists(ckpt_path_intervened):
+                                    with open(ckpt_path_intervened, "r") as f:
+                                        data = json.load(f)
+                                with open(ckpt_path_intervened, "w") as f:
+                                    json.dump(data + [result_intervened.model_dump()], f, indent=2)
+                        # if (answer_list[0] != False):
+                        total.append(True)
+                        if (does_improve == True):
+                            improved_count.append(True)
+                        # if (passed_intervened == True):
+                        intervened_succesful_count.append(best_intervened_score)
+
+            except Exception as e:
                 result_intervened = EnvRunResult(
-                    intervened_message = "no intervention was needed. already passed",
-                    intervened_index = str(-1),
-                    improved = 0,
                     task_id=idx,
-                    reward=result.reward,
-                    info=result.info,
-                    traj=result.traj,
+                    reward=0.0,
+                    info={"error": str(e), "traceback": traceback.format_exc()},
+                    traj=[],
                     trial=i,
                 )
-                print(f"already passed so no intervention needed. task_id: {idx}")
+                print(f"task id: {idx}. error: {e}.")
                 with lock:
                     data = []
                     if os.path.exists(ckpt_path_intervened):
@@ -232,217 +518,6 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                             data = json.load(f)
                     with open(ckpt_path_intervened, "w") as f:
                         json.dump(data + [result_intervened.model_dump()], f, indent=2)
-                    # continue
-            else:
-
-                #get intervention possibilites and conv history of intervening agent
-                print(f"determining interventions right now {idx}")
-                answer_list, intervening_agent_conversation = agent.run_intervention(
-                    env=isolated_env,
-                    task_index=idx,
-                    result=result,
-                    N=N
-                ) 
-                print(f"done {idx}")
-                does_improve = False
-                passed_intervened = False
-                best_intervened_score = 0
-                if (answer_list == None or answer_list[0] == False):
-                    # total.append(True)
-                    intervened_succesful_count.append(0.0)
-                    agent_conversation_histories.append({"task_id":idx,"traj":intervening_agent_conversation})
-                    result_intervened = EnvRunResult(
-                        intervened_message = "no intervention was done",
-                        failure_brief = "no intervention was done",
-                        failure_index = str(-1),
-                        intervened_index = str(-1),
-                        improved = 0,
-                        task_id=idx,
-                        reward=result.reward,
-                        success_prev = result.reward,
-                        success_after = None,
-                        info=result.info,
-                        traj=result.messages,
-                        trial=i,
-                    )
-                    with lock:
-                            data = []
-                            if os.path.exists(ckpt_path_intervened):
-                                with open(ckpt_path_intervened, "r") as f:
-                                    data = json.load(f)
-                            with open(ckpt_path_intervened, "w") as f:
-                                json.dump(data + [result_intervened.model_dump()], f, indent=2)
-                    # if (answer_list[0] != False):
-                    total.append(True)
-                    if (does_improve == True):
-                        improved_count.append(True)
-                    # if (passed_intervened == True):
-                    intervened_succesful_count.append(best_intervened_score)
-
-                    
-                else:
-                    #add conv history to all conv histories
-                    agent_conversation_histories.append({"task_id":idx,"traj":intervening_agent_conversation})
-
-                    transcript = result.model_dump()
-                    possible_new_trajectories = []
-                    
-
-                    def add_intervention(trajectory, intervention_text, intervention_id):
-                        try:
-                            if type(intervention_id) == int:
-                                idx_intervention =  intervention_id  
-                            else:
-                                idx_b = -1 if (intervention_id.rfind("B") == -1) else intervention_id.rfind("B")
-                                idx_intervention = int(intervention_id[idx_b+1:])
-                        except Exception as e:
-                            print(f"first converting to int idx: {idx} error: {e}.")
-                            idx_intervention = 1
-
-                        new_trajectory = trajectory[:min(idx_intervention+1, len(trajectory) - 1)]
-                        if (len(trajectory) - 1 < idx_intervention+1):
-                            print(f"was out of range task id: {idx}")
-                        new_trajectory.append(
-                            {
-                                "role":"system",
-                                "content": "[*INTERVENTION*: " +intervention_text + "]"
-                            }
-                        )
-
-                        return new_trajectory
-                    
-
-                    # print("possible interventions:", answer_list)
-
-                    
-                    for best_of_n_iterator, intervention in enumerate(answer_list):
-                        try:
-
-                            intervention_id = intervention["id"]
-                            if type(intervention_id) == int:
-                                idx_intervention =  intervention_id  
-                            else:
-                                idx_b = -1 if (intervention_id.rfind("B") == -1) else intervention_id.rfind("B")
-                                if idx_b == -1:
-                                    idx_b = -1 if (intervention_id.rfind("A") == -1) else intervention_id.rfind("A")
-                                idx_intervention = int(intervention_id[idx_b+1:])
-
-                        except Exception as e:
-                            print(f"converting to int idx: {idx} error: {e}.")
-                            idx_intervention = 1
-
-                        answer_list[best_of_n_iterator]["id"] = idx_intervention
-
-                    for best_of_n_iterator, intervention in enumerate(answer_list):
-                        try:
-
-                            failure_id = intervention["failure_id"]
-                            if type(failure_id) == int:
-                                idx_failure =  failure_id  
-                            else:
-                                idx_b = -1 if (failure_id.rfind("B") == -1) else failure_id.rfind("B")
-                                if idx_b == -1:
-                                    idx_b = -1 if (failure_id.rfind("A") == -1) else failure_id.rfind("A")
-                                idx_failure = int(failure_id[idx_b+1:])
-
-                        except Exception as e:
-                            print(f"failure id; converting to int idx: {idx} error: {e}.")
-                            idx_failure = 1
-
-                        answer_list[best_of_n_iterator]["failure_id"] = idx_failure
-
-                    sorted_answer_list = sorted(answer_list, key=lambda x: x['id'])
-                    
-                    # print("sorted possible interventions:", sorted_answer_list)
-
-                    #loop through all intervention possibilites
-                    # for best_of_n_iterator, intervention in enumerate([sorted_answer_list[0], sorted_answer_list[-1]]):
-                    for best_of_n_iterator, intervention in enumerate(sorted_answer_list):
-                        print(f"trying out task id={idx}, intervention {best_of_n_iterator}")
-                        
-                        failure_brief = intervention["failure_brief"]
-                        failure_id = intervention["failure_id"]
-                        intervention_text = intervention["intervention_text"]
-                        intervention_id = intervention["id"]
-                        print(f"intervention id: {intervention_id} intervention txt: {intervention_text}")
-                        
-                        #add intervention to trajectory
-                        new_intervened_trajectory = add_intervention(transcript["traj"], intervention_text, intervention_id)
-
-                        possible_new_trajectories.append(new_intervened_trajectory)
-
-                        
-                        #Run again but with intervention
-                        res_intervened = agent.solve_with_intervention(
-                            env=isolated_env,
-                            task_index=idx,
-                            messages=new_intervened_trajectory
-                        )
-                        
-
-                        # print("ran new agent task with intervened transcript")
-
-
-                        first_or_last = str(best_of_n_iterator)
-                        # if (best_of_n_iterator == 1):
-                        #     first_or_last = "last"
-                        
-                        #compile result of intervention
-                        result_intervened = EnvRunResult(
-                            failure_brief = failure_brief,
-                            failure_index = str(failure_id),
-                            intervened_message = intervention_text,
-                            intervened_first_or_last = first_or_last,
-                            intervened_index = str(intervention_id),
-                            improved = (result.reward == 0 and res_intervened.reward != 0),
-                            success_prev = result.reward,
-                            success_after = res_intervened.reward,
-                            task_id=idx,
-                            reward=res_intervened.reward,
-                            info=res_intervened.info,
-                            traj=res_intervened.messages,
-                            trial=i,
-                        )
-                        
-                        if result.reward == 0 and result_intervened.reward != 0:
-                            print(f"***IMPROVED*** task_id={idx} at location={intervention_id}")
-                            does_improve = True
-                        
-                        if result_intervened.reward != 0:
-                            passed_intervened = True
-                            best_intervened_score = max(result_intervened.reward, best_intervened_score)
-
-                    #save result of intervention
-                        with lock:
-                            data = []
-                            if os.path.exists(ckpt_path_intervened):
-                                with open(ckpt_path_intervened, "r") as f:
-                                    data = json.load(f)
-                            with open(ckpt_path_intervened, "w") as f:
-                                json.dump(data + [result_intervened.model_dump()], f, indent=2)
-                    # if (answer_list[0] != False):
-                    total.append(True)
-                    if (does_improve == True):
-                        improved_count.append(True)
-                    # if (passed_intervened == True):
-                    intervened_succesful_count.append(best_intervened_score)
-
-            # except Exception as e:
-                # result_intervened = EnvRunResult(
-                #     task_id=idx,
-                #     reward=0.0,
-                #     info={"error": str(e), "traceback": traceback.format_exc()},
-                #     traj=[],
-                #     trial=i,
-                # )
-                # print(f"task id: {idx}. error: {e}.")
-                # with lock:
-                #     data = []
-                #     if os.path.exists(ckpt_path_intervened):
-                #         with open(ckpt_path_intervened, "r") as f:
-                #             data = json.load(f)
-                #     with open(ckpt_path_intervened, "w") as f:
-                #         json.dump(data + [result_intervened.model_dump()], f, indent=2)
 
             
             try:
@@ -539,8 +614,23 @@ def agent_factory(
             provider=config.model_provider,
             use_reasoning=True,
             temperature=config.temperature,
+            intervenor_temperature=config.intervenor_temperature,
+            intervention_model=config.intervention_model,
+            intervention_provider=config.intervention_model_provider or "openai",
         )
     
+    elif config.agent_strategy == "react-reflexion":
+        from tau_bench.agents.chat_react_agent_reflexion import ChatReActAgentReflexion
+
+        return ChatReActAgentReflexion(
+            tools_info=tools_info,
+            wiki=wiki,
+            model=config.model,
+            provider=config.model_provider,
+            use_reasoning=True,
+            temperature=config.temperature,
+        )
+
     elif config.agent_strategy == "few-shot":
         from tau_bench.agents.few_shot_agent import FewShotToolCallingAgent
         assert config.few_shot_displays_path is not None, "Few shot displays path is required for few-shot agent strategy"

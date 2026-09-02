@@ -3,6 +3,7 @@
 import abc
 import enum
 from litellm import completion
+from tau_bench.llm_utils import completion_with_backoff
 
 from typing import Optional, List, Dict, Any, Union
 
@@ -44,12 +45,12 @@ class LLMUserSimulationEnv(BaseUserSimulationEnv):
         self.reset()
 
     def generate_next_message(self, messages: List[Dict[str, Any]]) -> str:
-        res = completion(
-            model=self.model, temperature=1.0,custom_llm_provider=self.provider, messages=messages
+        res = completion_with_backoff(
+            model=self.model, temperature=1.0,custom_llm_provider=self.provider, messages=messages, num_retries=5
         )
         message = res.choices[0].message
         self.messages.append(message.model_dump())
-        self.total_cost = res._hidden_params["response_cost"]
+        self.total_cost = (res._hidden_params.get("response_cost") or 0.0)
         return message.content
 
     def build_system_prompt(self, instruction: Optional[str]) -> str:
@@ -115,12 +116,12 @@ User Response:
 <the user response (this will be parsed and sent to the agent)>"""
 
     def generate_next_message(self, messages: List[Dict[str, Any]]) -> str:
-        res = completion(
-            model=self.model,temperature=1.0, custom_llm_provider=self.provider, messages=messages
+        res = completion_with_backoff(
+            model=self.model,temperature=1.0, custom_llm_provider=self.provider, messages=messages, num_retries=5
         )
         message = res.choices[0].message
         self.messages.append(message.model_dump())
-        self.total_cost = res._hidden_params["response_cost"]
+        self.total_cost = (res._hidden_params.get("response_cost") or 0.0)
         return self.parse_response(message.content)
 
     def reset(self, instruction: Optional[str] = None) -> str:
@@ -164,11 +165,11 @@ class VerifyUserSimulationEnv(LLMUserSimulationEnv):
         attempts = 0
         cur_message = None
         while attempts < self.max_attempts:
-            res = completion(
-                model=self.model, temperature=1.0, custom_llm_provider=self.provider, messages=messages
+            res = completion_with_backoff(
+                model=self.model, temperature=1.0, custom_llm_provider=self.provider, messages=messages, num_retries=5
             )
             cur_message = res.choices[0].message
-            self.total_cost = res._hidden_params["response_cost"]
+            self.total_cost = (res._hidden_params.get("response_cost") or 0.0)
             if verify(self.model, self.provider, cur_message, messages):
                 self.messages.append(cur_message.model_dump())
                 return cur_message.content
@@ -224,7 +225,7 @@ Your answer will be parsed, so do not include any other text than the classifica
 -----
 
 Classification:"""
-    res = completion(
+    res = completion_with_backoff(
         model=model,
         custom_llm_provider=provider,
         messages=[{"role": "user", "content": prompt}],
@@ -258,7 +259,7 @@ Reflection:
 
 Response:
 <the response (this will be parsed and sent to the agent)>"""
-    res = completion(
+    res = completion_with_backoff(
         model=model,
         custom_llm_provider=provider,
         messages=[{"role": "user", "content": prompt}],

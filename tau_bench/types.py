@@ -72,6 +72,8 @@ class EnvRunResult(BaseModel):
     success_prev: Optional[bool] = None
     success_after: Optional[bool] = None
     improved: Optional[bool] = None
+    reflection_text: Optional[str] = None
+    attempt_number: Optional[int] = None
     info: Dict[str, Any]
     traj: List[Dict[str, Any]]
     trial: int
@@ -86,10 +88,12 @@ class RunConfig(BaseModel):
     model: str
     user_model: str = "gpt-4o"
     intervention_model: Optional[str] = "gpt-4o"
+    intervention_model_provider: Optional[str] = None
     num_trials: int = 1
     env: str = "retail"
     agent_strategy: str = "tool-calling"
     temperature: float = 0.0
+    intervenor_temperature: float = 0.2
     task_split: str = "test"
     start_index: int = 0
     end_index: int = -1

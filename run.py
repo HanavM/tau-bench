@@ -24,6 +24,12 @@ def parse_args() -> RunConfig:
         help="The model to use for the intervenor agent",
     )
     parser.add_argument(
+        "--intervention-model-provider",
+        type=str,
+        choices=provider_list,
+        help="The model provider for the intervenor agent (defaults to openai)",
+    )
+    parser.add_argument(
         "--baseline_path",
         type=str,
         help="Path of the baseline results",
@@ -50,13 +56,19 @@ def parse_args() -> RunConfig:
         "--agent-strategy",
         type=str,
         default="tool-calling",
-        choices=["tool-calling", "act", "react", "few-shot", "react-intervened"],
+        choices=["tool-calling", "act", "react", "few-shot", "react-intervened", "react-reflexion"],
     )
     parser.add_argument(
         "--temperature",
         type=float,
         default=0.0,
         help="The sampling temperature for the action model",
+    )
+    parser.add_argument(
+        "--intervenor-temperature",
+        type=float,
+        default=0.2,
+        help="The sampling temperature for the intervening agent (the LLM that analyzes the failed transcript and proposes interventions in react-intervened's run_intervention). Separate from --temperature, which is the worker/user agent's temperature.",
     )
     parser.add_argument(
         "--task-split",
@@ -96,6 +108,7 @@ def parse_args() -> RunConfig:
         env=args.env,
         agent_strategy=args.agent_strategy,
         temperature=args.temperature,
+        intervenor_temperature=args.intervenor_temperature,
         task_split=args.task_split,
         start_index=args.start_index,
         end_index=args.end_index,
@@ -109,7 +122,8 @@ def parse_args() -> RunConfig:
         best_of_N=args.best_of_N,
         run_intervention=args.run_intervention,
         baseline_path=args.baseline_path,
-        intervention_model=args.intervention_model
+        intervention_model=args.intervention_model,
+        intervention_model_provider=args.intervention_model_provider,
 
     )
 
